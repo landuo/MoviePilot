@@ -40,6 +40,15 @@ if __name__ == '__main__':
     # 测试订阅洗版匹配
     suite.addTest(SubscribeChainTest('test_is_episode_range_covered'))
 
+    # 测试 Worker 子进程相关功能
+    loader = unittest.TestLoader()
+    suite.addTests(loader.loadTestsFromName("tests.test_worker_schemas"))
+    suite.addTests(loader.loadTestsFromName("tests.test_worker_config"))
+    suite.addTests(loader.loadTestsFromName("tests.test_worker_client"))
+    suite.addTests(loader.loadTestsFromName("tests.test_worker_client_manager"))
+    suite.addTests(loader.loadTestsFromName("tests.test_worker_callback"))
+    suite.addTests(loader.loadTestsFromName("tests.test_worker_integration"))
+
     # 运行测试
     runner = unittest.TextTestRunner()
     runner.run(suite)

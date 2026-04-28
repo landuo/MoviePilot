@@ -91,6 +91,40 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
     && if [ "$ARCH" = "aarch64" ]; then SUFFIX="aarch64-linux-gnu"; else SUFFIX="x86_64-linux-gnu"; fi \
     && curl -sL "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-${SUFFIX}.so" -o "/app/app/helper/sites.${python_ver}-${SUFFIX}.so"
 
+# 下载 worker 二进制
+# - 版本来源：version.py 中的 WORKERS_VERSION（留空则跳过下载）
+# - 失败容错：worker 不是必备组件，下载失败时 Python 会自动 fallback
+# - 平台映射：linux-amd64 / linux-arm64
+# - 可用 worker 列表请同步 docker/entrypoint.sh 的 should_start_worker 分支
+RUN mkdir -p /app/bin \
+    && WORKERS_VERSION=$(sed -n "s/^WORKERS_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
+    && if [ -n "${WORKERS_VERSION}" ]; then \
+        ARCH=$(uname -m); \
+        case "${ARCH}" in \
+            x86_64)  WORKER_PLATFORM="linux-amd64" ;; \
+            aarch64) WORKER_PLATFORM="linux-arm64" ;; \
+            armv7l)  WORKER_PLATFORM="linux-armv7" ;; \
+            *)       WORKER_PLATFORM="" ;; \
+        esac; \
+        if [ -n "${WORKER_PLATFORM}" ]; then \
+            for name in mp-watcher; do \
+                url="https://github.com/jxxghp/MoviePilot-Workers/releases/download/${WORKERS_VERSION}/${name}-${WORKER_PLATFORM}"; \
+                echo "Downloading worker: ${url}"; \
+                if curl -fsSL "${url}" -o "/app/bin/${name}"; then \
+                    chmod +x "/app/bin/${name}"; \
+                    echo "Worker ${name} (${WORKER_PLATFORM}) ready"; \
+                else \
+                    rm -f "/app/bin/${name}"; \
+                    echo "WARN: download failed for ${name}, will fallback to Python at runtime"; \
+                fi; \
+            done; \
+        else \
+            echo "WARN: unsupported arch ${ARCH}, skip worker download"; \
+        fi; \
+    else \
+        echo "INFO: WORKERS_VERSION 未设置，跳过 worker 二进制下载"; \
+    fi
+
 # final 阶段: 安装运行时依赖和配置最终镜像
 FROM prepare_package AS final
 

@@ -2,7 +2,8 @@ from fastapi import APIRouter
 
 from app.api.endpoints import login, user, webhook, message, site, subscribe, \
     media, douban, search, plugin, tmdb, history, system, download, dashboard, \
-    transfer, mediaserver, bangumi, storage, discover, recommend, workflow, torrent, mcp, mfa, openai, anthropic
+    transfer, mediaserver, bangumi, storage, discover, recommend, workflow, torrent, mcp, mfa, openai, anthropic, \
+    worker_callback
 
 api_router = APIRouter()
 api_router.include_router(login.router, prefix="/login", tags=["login"])
@@ -32,3 +33,4 @@ api_router.include_router(torrent.router, prefix="/torrent", tags=["torrent"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
 api_router.include_router(openai.router, prefix="/openai/v1", tags=["openai"])
 api_router.include_router(anthropic.router, prefix="/anthropic/v1", tags=["anthropic"])
+api_router.include_router(worker_callback.router, prefix="/worker_callback", tags=["worker_callback"], include_in_schema=False)

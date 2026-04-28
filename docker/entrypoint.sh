@@ -63,6 +63,10 @@ function load_config_from_app_env() {
         ["NGINX_PORT"]="3000"
         ["PORT"]="3001"
         ["NGINX_CLIENT_MAX_BODY_SIZE"]="10m"
+
+        # workers
+        ["WORKER_MODE"]="python"
+        ["WORKER_ENABLED"]=""
     )
 
     INFO "开始加载配置 (配置文件: ${env_file})..."
@@ -173,6 +177,87 @@ function load_config_from_app_env() {
     INFO "配置加载流程执行完毕。"
 }
 
+# 用于记录已启动的 worker PID（按 worker 名索引）
+declare -gA WORKER_PIDS=()
+
+# 判断指定的 worker 是否应该启动
+function should_start_worker() {
+    local name="$1"
+    if [ "${WORKER_MODE}" = "worker" ]; then
+        return 0
+    fi
+    if [ "${WORKER_MODE}" = "hybrid" ]; then
+        # WORKER_ENABLED 为逗号分隔列表
+        case ",${WORKER_ENABLED:-}," in
+            *",${name},"*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# 启动外部 worker 子进程
+function start_workers() {
+    if [ "${WORKER_MODE}" = "python" ] || [ -z "${WORKER_MODE}" ]; then
+        INFO "→ Worker 模式: python（不启动外部 worker）"
+        return 0
+    fi
+
+    INFO "→ Worker 模式: ${WORKER_MODE}, 启动外部 worker..."
+    local sock_dir="${CONFIG_DIR}/sockets"
+    mkdir -p "${sock_dir}"
+    chown moviepilot:moviepilot "${sock_dir}"
+
+    # mp-watcher
+    if should_start_worker "watcher"; then
+        local bin="/app/bin/mp-watcher"
+        if [ ! -x "${bin}" ]; then
+            WARN "→ mp-watcher 二进制不存在 (${bin})，跳过启动；Python 端将走 fallback"
+        else
+            gosu moviepilot:moviepilot "${bin}" \
+                --socket="${sock_dir}/mp-watcher.sock" \
+                --callback-url="http://127.0.0.1:${PORT}/api/v1/worker_callback/watcher" \
+                --log-format=json \
+                > /dev/stdout 2> /dev/stderr &
+            WORKER_PIDS["watcher"]=$!
+            INFO "→ mp-watcher 已启动 (PID: ${WORKER_PIDS["watcher"]})"
+        fi
+    fi
+
+    # 等待 socket 就绪（最多 10 秒），便于 Python 启动后立即可用
+    local i=0
+    while [ $i -lt 20 ]; do
+        local ready=true
+        for name in "${!WORKER_PIDS[@]}"; do
+            if [ ! -S "${sock_dir}/mp-${name}.sock" ]; then
+                ready=false
+                break
+            fi
+        done
+        ${ready} && break
+        sleep 0.5
+        i=$((i+1))
+    done
+    if [ ${#WORKER_PIDS[@]} -gt 0 ]; then
+        INFO "→ Worker socket 就绪检查完成"
+    fi
+}
+
+# 停止所有 worker 子进程
+function stop_workers() {
+    if [ ${#WORKER_PIDS[@]} -eq 0 ]; then
+        return 0
+    fi
+    INFO "→ 正在关闭 worker 子进程..."
+    for name in "${!WORKER_PIDS[@]}"; do
+        local pid="${WORKER_PIDS[$name]}"
+        if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+            INFO "  - 关闭 mp-${name} (PID: $pid)"
+            kill -TERM "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
 # 优雅退出
 function graceful_exit() {
     local exit_code=${1:-0}
@@ -196,6 +281,9 @@ function graceful_exit() {
         # 这里的 wait 会阻塞，直到 Python 真正退出
         wait "$PYTHON_PID" 2>/dev/null || true
     fi
+
+    # 第二.五步：关闭外部 worker 子进程
+    stop_workers
 
     # 第三步：最后关闭 Docker Proxy
     # 必须指定配置文件路径，否则 nginx -s stop 找不到它
@@ -318,6 +406,9 @@ if [ ${#VARS_SET_BY_SCRIPT[@]} -gt 0 ]; then
 else
     INFO "没有由非系统环境导入的变量需要清理。"
 fi
+
+# 启动外部 worker 子进程（必须在 Python 主进程之前）
+start_workers
 
 # 启动后端服务
 INFO "→ 启动后端服务..."

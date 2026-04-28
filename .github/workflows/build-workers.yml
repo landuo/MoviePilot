@@ -1,0 +1,152 @@
+name: Build Workers
+
+# 触发条件：
+#   - 推送形如 workers/v* 的 tag（推荐方式）
+#     例：git tag workers/v0.1.0 && git push origin workers/v0.1.0
+#   - 手动触发，需在 input 里指定 release tag
+#
+# 产物：mp-{name}-{platform}（如 mp-watcher-linux-amd64），上传到对应 tag 的 Release。
+# 平台命名必须与 docker/Dockerfile 中下载逻辑保持一致，修改前请同步检查。
+
+on:
+  push:
+    tags:
+      - 'workers/v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '发布到哪个 release tag（必填，例：workers/v0.1.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  discover:
+    name: Discover worker modules
+    runs-on: ubuntu-latest
+    outputs:
+      workers: ${{ steps.find.outputs.workers }}
+      has_workers: ${{ steps.find.outputs.has_workers }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: find
+        name: Find buildable workers
+        run: |
+          set -euo pipefail
+          # 列出 workers/ 下所有包含 main.go 的子目录（排除 shared）
+          mapfile -t dirs < <(find workers -mindepth 2 -maxdepth 2 -name main.go -not -path 'workers/shared/*' -printf '%h\n' | sort -u)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "未发现可构建的 worker，跳过后续 job"
+            echo "workers=[]" >> "$GITHUB_OUTPUT"
+            echo "has_workers=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 输出形如 ["mp-watcher", "mp-transfer"] 的 JSON 数组
+          json="["
+          for d in "${dirs[@]}"; do
+            name=$(basename "$d")
+            json+="\"${name}\","
+          done
+          json="${json%,}]"
+          echo "Discovered workers: $json"
+          echo "workers=${json}" >> "$GITHUB_OUTPUT"
+          echo "has_workers=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.worker }} (${{ matrix.platform.name }})
+    needs: discover
+    if: needs.discover.outputs.has_workers == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: ${{ fromJSON(needs.discover.outputs.workers) }}
+        platform:
+          - { name: linux-amd64, goos: linux, goarch: amd64, goarm: '' }
+          - { name: linux-arm64, goos: linux, goarch: arm64, goarm: '' }
+          - { name: linux-armv7, goos: linux, goarch: arm,   goarm: '7' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: |
+            workers/shared/go.sum
+            workers/${{ matrix.worker }}/go.sum
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.platform.goos }}
+          GOARCH: ${{ matrix.platform.goarch }}
+          GOARM: ${{ matrix.platform.goarm }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          out="dist/${{ matrix.worker }}-${{ matrix.platform.name }}"
+          cd "workers/${{ matrix.worker }}"
+          # -trimpath：去掉构建机绝对路径，便于稳定构建产物
+          # -ldflags "-s -w"：去 symbol 表和 DWARF 信息，缩小体积
+          go build -trimpath -ldflags "-s -w" -o "${GITHUB_WORKSPACE}/${out}" .
+          file "${GITHUB_WORKSPACE}/${out}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.worker }}-${{ matrix.platform.name }}
+          path: dist/${{ matrix.worker }}-${{ matrix.platform.name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish to Release
+    needs: [discover, build]
+    if: needs.discover.outputs.has_workers == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="${{ inputs.release_tag }}"
+          fi
+          if [ -z "$tag" ]; then
+            echo "release tag 为空，无法发布"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Workers ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            MoviePilot Workers binaries.
+
+            Download URL pattern (used by `docker/Dockerfile`):
+            ```
+            https://github.com/${{ github.repository }}/releases/download/<tag>/<worker>-<platform>
+            ```
+            Supported platforms: `linux-amd64`, `linux-arm64`, `linux-armv7`.
+          files: dist/*

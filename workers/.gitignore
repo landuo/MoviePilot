@@ -1,0 +1,16 @@
+# Go build outputs
+bin/
+dist/
+*.exe
+*.test
+*.out
+
+# Goreleaser
+.goreleaser-tmp/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

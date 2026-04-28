@@ -449,6 +449,22 @@ class ConfigModel(BaseModel):
     # 主动内存回收时间间隔（分钟），0为不启用
     MEMORY_GC_INTERVAL: int = 30
 
+    # ==================== Worker 子进程配置 ====================
+    # Worker 模式：python（默认，全 Python 实现，老用户零感知）
+    #              hybrid（按 WORKER_ENABLED 启用部分 worker）
+    #              worker（启用所有可用 worker）
+    WORKER_MODE: str = "python"
+    # hybrid 模式下启用的 worker 名称列表，例：["watcher"]
+    WORKER_ENABLED: List[str] = Field(default_factory=list)
+    # Worker socket 目录，未配置时为 CONFIG_PATH/sockets
+    WORKER_SOCKET_DIR: Optional[str] = None
+    # Worker RPC 调用超时（秒）
+    WORKER_RPC_TIMEOUT: int = 10
+    # 健康巡检间隔（秒）
+    WORKER_HEALTH_INTERVAL: int = 30
+    # 健康检查连续失败多少次后标记 worker 不健康
+    WORKER_HEALTH_FAIL_THRESHOLD: int = 3
+
     # ==================== 安全配置 ====================
     # 允许的图片缓存域名
     SECURITY_IMAGE_DOMAINS: list = Field(
@@ -892,6 +908,29 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
     @property
     def COOKIE_PATH(self):
         return self.CONFIG_PATH / "cookies"
+
+    @property
+    def WORKER_SOCKET_PATH(self) -> Path:
+        """
+        Worker Unix Socket 目录
+        """
+        if self.WORKER_SOCKET_DIR:
+            return Path(self.WORKER_SOCKET_DIR)
+        return self.CONFIG_PATH / "sockets"
+
+    def is_worker_enabled(self, worker_name: str) -> bool:
+        """
+        判断指定名称的 worker 是否被启用
+        :param worker_name: worker 名称（不含 mp- 前缀），如 "watcher"
+        """
+        mode = (self.WORKER_MODE or "python").lower()
+        if mode == "python":
+            return False
+        if mode == "worker":
+            return True
+        if mode == "hybrid":
+            return worker_name in (self.WORKER_ENABLED or [])
+        return False
 
     @property
     def CONF(self) -> SystemConfModel:
