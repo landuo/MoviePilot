@@ -22,6 +22,7 @@ from app.helper.message import MessageHelper
 from app.log import logger
 from app.schemas import FileItem
 from app.schemas.types import SystemConfigKey
+from app.utils import monitor_worker
 from app.utils.mixins import ConfigReloadMixin
 from app.utils.singleton import SingletonClass
 from app.utils.system import SystemUtils
@@ -81,6 +82,9 @@ class Monitor(ConfigReloadMixin, metaclass=SingletonClass):
         self._snapshot_cache = FileCache(base=settings.CACHE_PATH / "snapshots")
         # 监控的文件扩展名
         self.all_exts = settings.RMT_MEDIAEXT + settings.RMT_SUBEXT + settings.RMT_AUDIOEXT
+        # 当本轮 init 中本地目录已通过 worker 接管时，记录 watch_id 集合，
+        # 用于回调反查、stop() 清理、避免回退分支重复启动 watchdog
+        self._worker_watch_ids: set = set()
         # 启动目录监控和文件整理
         self.init()
 
@@ -398,6 +402,15 @@ class Monitor(ConfigReloadMixin, metaclass=SingletonClass):
 
         messagehelper = MessageHelper()
         mon_storages = {}
+
+        # 先尝试用 mp-watcher worker 接管所有本地目录监控（一次全量推送）；
+        # 成功的 watch_id 会被下面的循环跳过；失败时（worker 不可用或调用出错）
+        # 返回空 set，走原 watchdog/PollingObserver 路径，保证向后兼容。
+        worker_handled_dirs = monitor_worker.try_configure_watcher(
+            monitor_dirs, self._on_worker_event,
+        )
+        self._worker_watch_ids = worker_handled_dirs
+
         for mon_dir in monitor_dirs:
             if not mon_dir.library_path:
                 logger.warn(f"跳过监控配置 {mon_dir.download_path}：未设置媒体库目录")
@@ -412,6 +425,12 @@ class Monitor(ConfigReloadMixin, metaclass=SingletonClass):
             if target_path.is_relative_to(mon_path):
                 logger.warn(f"{target_path} 是监控目录 {mon_path} 的子目录，无法监控！")
                 messagehelper.put(f"{target_path} 是监控目录 {mon_path} 的子目录，无法监控", title="目录监控")
+                continue
+
+            # 已被 worker 接管的本地目录直接跳过，避免重复启动 watchdog
+            if mon_dir.storage == "local" \
+                    and monitor_worker.make_watch_id(mon_dir) in worker_handled_dirs:
+                logger.debug(f"目录 {mon_path} 已由 mp-watcher 接管，跳过 watchdog 启动")
                 continue
 
             # 启动监控
@@ -519,7 +538,22 @@ class Monitor(ConfigReloadMixin, metaclass=SingletonClass):
         # 输出监控总结
         local_count = len([d for d in monitor_dirs if d.storage == "local" and d.monitor_type == "monitor"])
         remote_count = len([d for d in monitor_dirs if d.storage != "local" and d.monitor_type == "monitor"])
-        logger.info(f"目录监控启动完成: 本地监控 {local_count} 个，远程监控 {remote_count} 个")
+        worker_count = len(self._worker_watch_ids)
+        logger.info(
+            f"目录监控启动完成: 本地监控 {local_count} 个"
+            f"（其中 mp-watcher 接管 {worker_count} 个），远程监控 {remote_count} 个"
+        )
+
+    def _on_worker_event(self, text: str, src_path: str,
+                         file_size: int, event: Any) -> None:
+        """
+        mp-watcher 回调入口：直接桥接到 event_handler，复用现有去重/整理逻辑。
+
+        event 是 monitor_worker.WorkerFileEvent，鸭子类型，
+        只需提供 is_directory 字段即可被 event_handler 消费。
+        """
+        self.event_handler(event=event, text=text,
+                           event_path=src_path, file_size=file_size)
 
     def __choose_observer(self) -> Optional[Any]:
         """
@@ -738,6 +772,10 @@ class Monitor(ConfigReloadMixin, metaclass=SingletonClass):
         退出监控
         """
         self._event.set()
+        # 注销 worker 回调（即使本轮没注册也是安全的 no-op）
+        if self._worker_watch_ids:
+            monitor_worker.release_watcher()
+            self._worker_watch_ids = set()
         if self._observers:
             logger.info("正在停止本地目录监控服务...")
             for observer in self._observers:
