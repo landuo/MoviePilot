@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 from urllib.parse import urlparse
 
 from dotenv import set_key
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.log import logger, log_settings, LogConfigModel
@@ -454,8 +454,40 @@ class ConfigModel(BaseModel):
     #              hybrid（按 WORKER_ENABLED 启用部分 worker）
     #              worker（启用所有可用 worker）
     WORKER_MODE: str = "python"
-    # hybrid 模式下启用的 worker 名称列表，例：["watcher"]
+    # hybrid 模式下启用的 worker 名称列表
+    # 支持三种环境变量写法（详见 _normalize_worker_enabled）：
+    #   1. 单值：    WORKER_ENABLED=watcher
+    #   2. 逗号分隔：WORKER_ENABLED=watcher,transfer
+    #   3. JSON：    WORKER_ENABLED=["watcher","transfer"]
     WORKER_ENABLED: List[str] = Field(default_factory=list)
+
+    @field_validator("WORKER_ENABLED", mode="before")
+    @classmethod
+    def _normalize_worker_enabled(cls, value: Any) -> Any:
+        """
+        宽松解析 WORKER_ENABLED：
+        - 已经是 list/tuple/set → 原样返回（pydantic 后续会处理元素类型）
+        - 字符串 → 优先按 JSON 解析；失败则按逗号分隔；空串/None 视为空列表
+        """
+        if value is None or value == "":
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return list(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            # 形如 ["watcher", "transfer"] 优先 JSON 解析
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # 退化为逗号分隔
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
     # Worker socket 目录，未配置时为 CONFIG_PATH/sockets
     WORKER_SOCKET_DIR: Optional[str] = None
     # Worker RPC 调用超时（秒）

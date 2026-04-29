@@ -181,14 +181,24 @@ function load_config_from_app_env() {
 declare -gA WORKER_PIDS=()
 
 # 判断指定的 worker 是否应该启动
+# WORKER_ENABLED 兼容三种格式（与 app/core/config.py:_normalize_worker_enabled 对齐）：
+#   1. 单值：    watcher
+#   2. 逗号分隔：watcher,transfer
+#   3. JSON 数组：["watcher","transfer"]
 function should_start_worker() {
     local name="$1"
     if [ "${WORKER_MODE}" = "worker" ]; then
         return 0
     fi
     if [ "${WORKER_MODE}" = "hybrid" ]; then
-        # WORKER_ENABLED 为逗号分隔列表
-        case ",${WORKER_ENABLED:-}," in
+        # 把 JSON 数组的方括号、引号、空白都替换成逗号，再做包夹匹配
+        local normalized="${WORKER_ENABLED:-}"
+        normalized="${normalized//\[/,}"
+        normalized="${normalized//\]/,}"
+        normalized="${normalized//\"/}"
+        normalized="${normalized//\'/}"
+        normalized="${normalized// /}"
+        case ",${normalized}," in
             *",${name},"*) return 0 ;;
         esac
     fi

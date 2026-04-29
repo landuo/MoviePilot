@@ -91,39 +91,45 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
     && if [ "$ARCH" = "aarch64" ]; then SUFFIX="aarch64-linux-gnu"; else SUFFIX="x86_64-linux-gnu"; fi \
     && curl -sL "https://raw.githubusercontent.com/jxxghp/MoviePilot-Resources/main/resources.v2/sites.${python_ver}-${SUFFIX}.so" -o "/app/app/helper/sites.${python_ver}-${SUFFIX}.so"
 
-# 下载 worker 二进制
-# - 版本来源：version.py 中的 WORKERS_VERSION（留空则跳过下载）
-# - 失败容错：worker 不是必备组件，下载失败时 Python 会自动 fallback
-# - 平台映射：linux-amd64 / linux-arm64
-# - 可用 worker 列表请同步 docker/entrypoint.sh 的 should_start_worker 分支
+# 准备 worker 二进制
+# 优先级：本地编译 > GitHub Release 下载 > fallback 到 Python
+# 1. 本地编译产物：workers/bin/mp-{name}（开发/CI 测试场景，不区分平台，由用户保证架构匹配）
+# 2. GitHub Release：仅当 version.py 的 WORKERS_VERSION 非空时尝试下载
+# 3. 都没有：跳过，运行时 Python 自动 fallback
+# 本地编译产物从 prepare_code 阶段的 /app/workers/bin/ 拷贝
 RUN mkdir -p /app/bin \
     && WORKERS_VERSION=$(sed -n "s/^WORKERS_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
-    && if [ -n "${WORKERS_VERSION}" ]; then \
-        ARCH=$(uname -m); \
-        case "${ARCH}" in \
-            x86_64)  WORKER_PLATFORM="linux-amd64" ;; \
-            aarch64) WORKER_PLATFORM="linux-arm64" ;; \
-            armv7l)  WORKER_PLATFORM="linux-armv7" ;; \
-            *)       WORKER_PLATFORM="" ;; \
-        esac; \
-        if [ -n "${WORKER_PLATFORM}" ]; then \
-            for name in mp-watcher; do \
+    && for name in mp-watcher; do \
+        local_bin="/app/workers/bin/${name}"; \
+        if [ -x "${local_bin}" ]; then \
+            cp -f "${local_bin}" "/app/bin/${name}"; \
+            chmod +x "/app/bin/${name}"; \
+            echo "Worker ${name} 使用本地编译产物 (${local_bin})"; \
+        elif [ -n "${WORKERS_VERSION}" ]; then \
+            ARCH=$(uname -m); \
+            case "${ARCH}" in \
+                x86_64)  WORKER_PLATFORM="linux-amd64" ;; \
+                aarch64) WORKER_PLATFORM="linux-arm64" ;; \
+                armv7l)  WORKER_PLATFORM="linux-armv7" ;; \
+                *)       WORKER_PLATFORM="" ;; \
+            esac; \
+            if [ -n "${WORKER_PLATFORM}" ]; then \
                 url="https://github.com/jxxghp/MoviePilot-Workers/releases/download/${WORKERS_VERSION}/${name}-${WORKER_PLATFORM}"; \
                 echo "Downloading worker: ${url}"; \
                 if curl -fsSL "${url}" -o "/app/bin/${name}"; then \
                     chmod +x "/app/bin/${name}"; \
-                    echo "Worker ${name} (${WORKER_PLATFORM}) ready"; \
+                    echo "Worker ${name} (${WORKER_PLATFORM}) 下载成功"; \
                 else \
                     rm -f "/app/bin/${name}"; \
-                    echo "WARN: download failed for ${name}, will fallback to Python at runtime"; \
+                    echo "WARN: ${name} 下载失败，运行时将 fallback 到 Python"; \
                 fi; \
-            done; \
+            else \
+                echo "WARN: 不支持的架构 ${ARCH}，跳过 ${name} 下载"; \
+            fi; \
         else \
-            echo "WARN: unsupported arch ${ARCH}, skip worker download"; \
+            echo "INFO: 未找到本地 ${name}，且 WORKERS_VERSION 未设置，跳过"; \
         fi; \
-    else \
-        echo "INFO: WORKERS_VERSION 未设置，跳过 worker 二进制下载"; \
-    fi
+    done
 
 # final 阶段: 安装运行时依赖和配置最终镜像
 FROM prepare_package AS final
