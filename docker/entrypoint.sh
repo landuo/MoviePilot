@@ -401,6 +401,12 @@ fi
 # 设置后端服务权限掩码
 umask "${UMASK}"
 
+# 启动外部 worker 子进程（必须在 Python 主进程之前）
+# 注意：必须放在下面的 unset 阶段之前，否则 PORT/WORKER_MODE/WORKER_ENABLED
+# 等由 load_config_from_app_env 注入的变量会被清掉，导致 worker 拿不到正确的
+# callback URL 端口和启动条件。
+start_workers
+
 # 清除非系统环境导入的变量，保证转移到 dumb-init 的时候，不会带入不必要的环境变量
 INFO "准备为 Python 应用清理的非系统环境导入的变量..."
 if [ ${#VARS_SET_BY_SCRIPT[@]} -gt 0 ]; then
@@ -416,9 +422,6 @@ if [ ${#VARS_SET_BY_SCRIPT[@]} -gt 0 ]; then
 else
     INFO "没有由非系统环境导入的变量需要清理。"
 fi
-
-# 启动外部 worker 子进程（必须在 Python 主进程之前）
-start_workers
 
 # 启动后端服务
 INFO "→ 启动后端服务..."
