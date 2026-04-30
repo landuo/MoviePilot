@@ -9,7 +9,8 @@ SystemUtils 与 mp-transfer worker 协同的单元测试
   4. 相对路径 → 不走 worker，直接本地实现
 
 策略：
-- 通过 patch app.utils.system.WorkerClientManager / settings 控制 worker 状态
+- _try_worker_transfer 内部是"延迟导入"WorkerClientManager 的，因此 patch 必须打
+  在源头模块 app.utils.worker_client 上，而不是 app.utils.system 上
 - 用真实临时目录验证本地 fallback 的行为正确（避免 mock shutil 误伤）
 """
 import shutil
@@ -20,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from app.core.config import settings
 from app.schemas.worker import TransferMode, WorkerCallError
-from app.utils import system as system_module
+from app.utils import worker_client as worker_client_module
 from app.utils.singleton import SingletonClass
 from app.utils.system import SystemUtils
 from app.utils.worker_client import WorkerClientManager
@@ -55,8 +56,7 @@ class _TransferTestBase(TestCase):
 
     def _patch_worker_client(self, *, available: bool, raises: Exception = None):
         """
-        构造一个 mock client 并把 WorkerClientManager().get(...) 接管。
-        返回 (manager_patch, mock_client) 的上下文使用方式见调用处。
+        构造一个 mock client。调用方负责用 _patch_manager 上下文把它注入进去。
         """
         client = MagicMock()
         client.is_available.return_value = available
@@ -65,6 +65,17 @@ class _TransferTestBase(TestCase):
         else:
             client.call_or_raise.return_value = {}
         return client
+
+    def _patch_manager(self, client):
+        """
+        patch app.utils.worker_client.WorkerClientManager，让其返回的实例的
+        get(name) 始终返回我们构造的 mock client。
+
+        必须 patch 在源头模块上，因为 app/utils/system.py 是延迟导入的，
+        模块顶层并不持有 WorkerClientManager 这个属性。
+        """
+        return patch.object(worker_client_module, "WorkerClientManager",
+                            return_value=MagicMock(get=MagicMock(return_value=client)))
 
 class CopyWithWorkerTest(_TransferTestBase):
     def test_worker_disabled_falls_back_to_shutil(self):
@@ -76,8 +87,7 @@ class CopyWithWorkerTest(_TransferTestBase):
     def test_worker_success_returns_zero_without_local_io(self):
         self._enable_transfer_worker()
         client = self._patch_worker_client(available=True)
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             with patch("shutil.copy2") as local_copy:
                 ret, msg = SystemUtils.copy(self.src, self.dst)
         self.assertEqual((ret, msg), (0, ""))
@@ -94,8 +104,7 @@ class CopyWithWorkerTest(_TransferTestBase):
     def test_worker_unavailable_falls_back(self):
         self._enable_transfer_worker()
         client = self._patch_worker_client(available=False)
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             ret, msg = SystemUtils.copy(self.src, self.dst)
         self.assertEqual((ret, msg), (0, ""))
         # 不应触发远程调用
@@ -108,8 +117,7 @@ class CopyWithWorkerTest(_TransferTestBase):
         client = self._patch_worker_client(
             available=True, raises=WorkerCallError("boom")
         )
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             ret, msg = SystemUtils.copy(self.src, self.dst)
         self.assertEqual((ret, msg), (0, ""))
         # worker 被尝试过，但失败后落回本地
@@ -123,8 +131,7 @@ class CopyWithWorkerTest(_TransferTestBase):
         """
         self._enable_transfer_worker()
         client = self._patch_worker_client(available=True)
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             # 用 cwd 以外的相对路径，shutil.copy2 不会真的成功，所以这里
             # mock 掉本地 IO 仅断言路由判断
             with patch("shutil.copy2") as local_copy:
@@ -136,8 +143,7 @@ class MoveWithWorkerTest(_TransferTestBase):
     def test_worker_success(self):
         self._enable_transfer_worker()
         client = self._patch_worker_client(available=True)
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             with patch("shutil.move") as local_move:
                 ret, msg = SystemUtils.move(self.src, self.dst)
         self.assertEqual((ret, msg), (0, ""))
@@ -156,8 +162,7 @@ class LinkWithWorkerTest(_TransferTestBase):
     def test_worker_success(self):
         self._enable_transfer_worker()
         client = self._patch_worker_client(available=True)
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             ret, msg = SystemUtils.link(self.src, self.dst)
         self.assertEqual((ret, msg), (0, ""))
         payload = client.call_or_raise.call_args.args[1]
@@ -174,8 +179,7 @@ class SoftlinkWithWorkerTest(_TransferTestBase):
     def test_worker_success(self):
         self._enable_transfer_worker()
         client = self._patch_worker_client(available=True)
-        with patch.object(system_module, "WorkerClientManager") as mgr:
-            mgr.return_value.get.return_value = client
+        with self._patch_manager(client):
             ret, msg = SystemUtils.softlink(self.src, self.dst)
         self.assertEqual((ret, msg), (0, ""))
         payload = client.call_or_raise.call_args.args[1]
