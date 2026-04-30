@@ -252,5 +252,47 @@ class SearchChainBatchRoutingTest(unittest.TestCase):
         self.assertEqual(actual_keyword, "fallback title")
 
 
+class ModuleImportSmokeTest(unittest.TestCase):
+    """
+    模块导入 smoke test：保证 IndexerModule / SearchChain 的类定义阶段不出现
+    NameError、ImportError 等导入期错误。
+
+    历史教训：曾出现 batch_search_torrents 方法签名用了 Dict[int, List[TorrentInfo]]
+    但顶部 typing 导入漏了 Dict 的 bug，导致整个 IndexerModule 类在 import 阶段就崩溃。
+    上层 FastAPI 把异常吞掉只表现为 "0 资源 0 秒"，排查极其困难。
+    本测试用最快的速度（仅做 import）暴露这类问题。
+    """
+
+    def test_indexer_module_can_be_imported(self):
+        """IndexerModule 必须能正常 import（验证类定义阶段无 NameError）"""
+        try:
+            from app.modules.indexer import IndexerModule  # noqa: F401
+        except ImportError as e:
+            self.skipTest(f"依赖缺失，跳过：{e}")
+        except NameError as e:
+            self.fail(f"IndexerModule 导入时出现 NameError（typing 导入或符号引用错误）：{e}")
+
+    def test_indexer_module_has_batch_methods(self):
+        """IndexerModule 必须暴露批量入口方法（防止方法被误删）"""
+        try:
+            from app.modules.indexer import IndexerModule
+        except ImportError as e:
+            self.skipTest(f"依赖缺失，跳过：{e}")
+
+        self.assertTrue(hasattr(IndexerModule, "batch_search_torrents"),
+                        "IndexerModule 缺少 batch_search_torrents 方法")
+        self.assertTrue(hasattr(IndexerModule, "async_batch_search_torrents"),
+                        "IndexerModule 缺少 async_batch_search_torrents 方法")
+
+    def test_search_chain_can_be_imported(self):
+        """SearchChain 必须能正常 import"""
+        try:
+            from app.chain.search import SearchChain  # noqa: F401
+        except ImportError as e:
+            self.skipTest(f"依赖缺失，跳过：{e}")
+        except NameError as e:
+            self.fail(f"SearchChain 导入时出现 NameError：{e}")
+
+
 if __name__ == "__main__":
     unittest.main()

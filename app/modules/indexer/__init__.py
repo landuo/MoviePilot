@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from app.core.context import TorrentInfo
 from app.db.site_oper import SiteOper
