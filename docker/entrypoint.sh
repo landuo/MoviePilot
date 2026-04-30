@@ -233,6 +233,22 @@ function start_workers() {
         fi
     fi
 
+    # mp-transfer
+    # 纯请求-响应模式，不需要 callback URL；与 mp-watcher 共用 socket 目录
+    if should_start_worker "transfer"; then
+        local bin="/app/bin/mp-transfer"
+        if [ ! -x "${bin}" ]; then
+            WARN "→ mp-transfer 二进制不存在 (${bin})，跳过启动；Python 端将走 fallback"
+        else
+            gosu moviepilot:moviepilot "${bin}" \
+                --socket="${sock_dir}/mp-transfer.sock" \
+                --log-format=json \
+                > /dev/stdout 2> /dev/stderr &
+            WORKER_PIDS["transfer"]=$!
+            INFO "→ mp-transfer 已启动 (PID: ${WORKER_PIDS["transfer"]})"
+        fi
+    fi
+
     # 等待 socket 就绪（最多 10 秒），便于 Python 启动后立即可用
     local i=0
     while [ $i -lt 20 ]; do

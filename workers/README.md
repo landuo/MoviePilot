@@ -12,18 +12,18 @@
 
 | 名称 | 职责 | 状态 |
 |---|---|---|
-| `mp-watcher` | 本地目录文件监控（fsnotify） | P1-A 已交付 |
-| `mp-mover`   | 大文件转移（硬链/拷贝/校验） | P2（规划） |
-| `mp-indexer` | 多站点搜索调度 | P3（规划） |
+| `mp-watcher`  | 本地目录文件监控（fsnotify） | P1-A 已交付 |
+| `mp-transfer` | 物理 IO 加速（copy/move/link/softlink，Linux 零拷贝） | P1-C 已交付 |
+| `mp-indexer`  | 多站点搜索调度 | P3（规划） |
 
 ## 目录结构
 
 ```
 workers/
 ├── go.work               # Go workspace 多模块声明
-├── shared/               # 跨 worker 共享库（transport / log / lifecycle）
-├── mp-watcher/           # P1
-├── mp-mover/             # P2
+├── shared/               # 跨 worker 共享库（transport / log / lifecycle / config）
+├── mp-watcher/           # P1-A
+├── mp-transfer/          # P1-C
 └── mp-indexer/           # P3
 ```
 
@@ -53,9 +53,10 @@ WORKER_ENABLED=watcher
 
 ```bash
 cd workers
-make build           # 构建当前平台所有 worker，产物在 workers/bin/
-make build-watcher   # 仅构建 mp-watcher
-make release         # 通过 goreleaser 多平台构建，产物在 workers/dist/
+make build            # 构建当前平台所有 worker，产物在 workers/bin/
+make build-watcher    # 仅构建 mp-watcher
+make build-transfer   # 仅构建 mp-transfer
+make release          # 通过 goreleaser 多平台构建，产物在 workers/dist/
 ```
 
 `make build` 仅用于本地开发。容器内运行时由 `docker/entrypoint.sh` 在
@@ -150,3 +151,68 @@ mp-watcher 主动推送给 `--callback-url` 的事件：
 - **回调背压保护**：in-flight 推送数限制为 8，超限时丢弃事件并 `warn` 日志（防止 Python 慢响应撑爆内存）
 - **`Configure` 是全量重置**：Python 端不需要维护增量协议，每次推送完整列表，Go 端做 diff
 - **REMOVE / CHMOD 事件不上报**：Python 端目前不消费
+
+---
+
+## mp-transfer
+
+物理 IO 加速器，接管 `app/utils/system.py` 中 `SystemUtils.copy / move / link / softlink` 4 个静态方法。
+Linux 下使用 `copy_file_range` 走内核侧零拷贝；其他平台 fallback `io.Copy`。
+**只做 local→local 的物理操作**——识别、命名、刮削、远端存储、历史记录、伴生文件配对全留 Python。
+
+### 启动参数
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `--socket` | ✅ | UDS 文件路径，例：`/config/sockets/mp-transfer.sock` |
+| `--callback-url` | ❌ | **不使用**（纯请求-响应模式，无主动推送） |
+| `--log-level` | ❌ | `debug` / `info`（默认）/ `warn` / `error` |
+| `--log-format` | ❌ | `json`（默认）/ `text` |
+
+### 业务接口
+
+#### `POST /api/v1/transfer`
+
+执行一次物理 IO 操作。
+
+请求：
+```json
+{"mode": "copy", "src": "/data/src/foo.mkv", "dst": "/data/dst/foo.mkv"}
+```
+
+`mode` 取值：`copy` / `move` / `link`（硬链接）/ `softlink`（软链接）。
+`src` 与 `dst` **必须是绝对路径**（worker 进程 cwd 不一定与 Python 一致）。
+
+响应：
+```json
+{"code": 0, "message": "ok",
+ "data": {"mode": "copy", "bytes": 1234567, "duration_ms": 42}}
+```
+
+错误码分流（用于 Python 侧分类降级）：
+- `1000` 参数错误（mode 非法 / 路径相对 / 路径相同）—— Python 不应 fallback
+- `3000` IO 错误（源不存在 / 目标无权限 / 跨设备失败等）—— Python 自动 fallback shutil
+
+#### `GET /api/v1/transfer_stats`
+
+返回累计计数器，便于运维巡检。
+
+响应：
+```json
+{"code": 0, "data": {
+  "total": 1234, "failed": 5, "bytes_total": 9876543210,
+  "by_mode": {"copy": 100, "move": 50, "link": 1000, "softlink": 84}
+}}
+```
+
+### 设计要点
+
+- **行为与 Python 端 100% 对齐**：单元测试覆盖到 inode 共享、空文件、跨设备等边界，
+  worker 调用失败 fallback 到 `shutil` 时业务结果一致
+- **零拷贝退化策略**：`copy_file_range` 遇到 `EXDEV / ENOSYS / EINVAL / EOPNOTSUPP`
+  自动降级为 `io.Copy`，保证任何 Linux 环境（NFS / 旧内核 / tmpfs）都能成功
+- **硬链接 tmp + rename**：与原 `SystemUtils.link` 一致使用 `dst.mp` 中间名，
+  避免目录监控感知到半成品文件
+- **不创建父目录**：与原 `SystemUtils` 行为一致，由调用方（`TransHandler`）保证 `dst` 父目录存在
+- **不抛异常给调用方**：`SystemUtils` 4 个方法的对外契约（返回 `(int, str)`）保持不变，
+  worker 错误一律收敛到 fallback 分支

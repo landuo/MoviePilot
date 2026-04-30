@@ -48,6 +48,7 @@ if __name__ == '__main__':
     suite.addTests(loader.loadTestsFromName("tests.test_worker_client_manager"))
     suite.addTests(loader.loadTestsFromName("tests.test_worker_callback"))
     suite.addTests(loader.loadTestsFromName("tests.test_worker_integration"))
+    suite.addTests(loader.loadTestsFromName("tests.test_system_utils_worker"))
 
     # 运行测试
     runner = unittest.TextTestRunner()

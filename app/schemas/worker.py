@@ -40,3 +40,27 @@ class WatcherFileEvent(BaseModel):
     file_size: int = 0
     mtime_unix: int = 0
     is_directory: bool = False
+
+class TransferMode:
+    """mp-transfer 支持的整理模式（与 workers/mp-transfer/internal/ops/ops.go 对齐）"""
+
+    COPY = "copy"
+    MOVE = "move"
+    LINK = "link"
+    SOFTLINK = "softlink"
+
+    ALL = (COPY, MOVE, LINK, SOFTLINK)
+
+class TransferRequest(BaseModel):
+    """mp-transfer 的 /api/v1/transfer 请求载荷"""
+
+    mode: str = Field(description="copy / move / link / softlink")
+    src: str = Field(description="源文件绝对路径")
+    dst: str = Field(description="目标文件绝对路径")
+
+class TransferResult(BaseModel):
+    """mp-transfer 的 /api/v1/transfer 响应数据"""
+
+    mode: str
+    bytes: int = 0
+    duration_ms: int = 0

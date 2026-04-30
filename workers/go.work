@@ -3,4 +3,5 @@ go 1.22
 use (
 	./shared
 	./mp-watcher
+	./mp-transfer
 )

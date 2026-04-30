@@ -13,6 +13,56 @@ from typing import List, Optional, Tuple, Union
 import psutil
 
 from app import schemas
+from app.schemas.worker import TransferMode, WorkerError
+
+# mp-transfer worker 的接口路径，集中常量便于后续协议升级
+_TRANSFER_WORKER_NAME = "transfer"
+_TRANSFER_API_PATH = "/api/v1/transfer"
+
+def _try_worker_transfer(mode: str, src: Path, dest: Path) -> Optional[Tuple[int, str]]:
+    """
+    尝试通过 mp-transfer worker 完成一次物理 IO 操作。
+
+    返回值约定：
+    - 返回 (0, "")：worker 调用成功，调用方应直接返回此结果；
+    - 返回 None：worker 不可用 / 调用异常 / 未启用，调用方应继续走 Python 本地实现降级。
+
+    设计要点：
+    - 不抛异常给调用方：所有 worker 错误都收敛到 "返回 None 走降级"，
+      避免改变 SystemUtils.copy/move/link/softlink 的对外行为契约；
+    - 路径必须为绝对路径：worker 进程 cwd 不一定与 Python 一致；
+    - 仅在 worker_name 已启用时才走 worker 路径，未启用时直接 None，
+      不打印任何日志，避免与现有 watcher 巡检日志互相干扰。
+    """
+    # 延迟导入避免顶层循环依赖（worker_client 反向依赖了 schemas/log/...）
+    try:
+        from app.core.config import settings
+        from app.utils.worker_client import WorkerClientManager
+    except Exception:
+        return None
+
+    if not settings.is_worker_enabled(_TRANSFER_WORKER_NAME):
+        return None
+
+    src_str = str(src)
+    dest_str = str(dest)
+    if not os.path.isabs(src_str) or not os.path.isabs(dest_str):
+        # 相对路径无法跨进程语义对齐，直接走本地
+        return None
+
+    client = WorkerClientManager().get(_TRANSFER_WORKER_NAME)
+    if not client.is_available():
+        return None
+
+    try:
+        client.call_or_raise(
+            _TRANSFER_API_PATH,
+            {"mode": mode, "src": src_str, "dst": dest_str},
+        )
+    except WorkerError:
+        # 让调用方降级；具体错误日志由 WorkerClient 内部记录，避免双倍噪音
+        return None
+    return 0, ""
 
 
 class SystemUtils:
@@ -154,6 +204,10 @@ class SystemUtils:
         """
         复制
         """
+        # 优先走 mp-transfer worker（Linux 下走 copy_file_range 零拷贝）
+        worker_result = _try_worker_transfer(TransferMode.COPY, src, dest)
+        if worker_result is not None:
+            return worker_result
         try:
             shutil.copy2(src, dest)
             return 0, ""
@@ -165,6 +219,9 @@ class SystemUtils:
         """
         移动
         """
+        worker_result = _try_worker_transfer(TransferMode.MOVE, src, dest)
+        if worker_result is not None:
+            return worker_result
         try:
             # 直接移动到目标路径，避免中间改名步骤触发目录监控
             shutil.move(src, dest)
@@ -177,6 +234,9 @@ class SystemUtils:
         """
         硬链接
         """
+        worker_result = _try_worker_transfer(TransferMode.LINK, src, dest)
+        if worker_result is not None:
+            return worker_result
         try:
             # 准备目标路径，增加后缀 .mp
             tmp_path = dest.with_suffix(dest.suffix + ".mp")
@@ -195,6 +255,9 @@ class SystemUtils:
         """
         软链接
         """
+        worker_result = _try_worker_transfer(TransferMode.SOFTLINK, src, dest)
+        if worker_result is not None:
+            return worker_result
         try:
             dest.symlink_to(src)
             return 0, ""
