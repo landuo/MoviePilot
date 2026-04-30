@@ -2,7 +2,6 @@ import base64
 import json
 import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
@@ -14,8 +13,7 @@ from app.agent.tools.impl.send_local_file import SendLocalFileInput
 from app.agent import MoviePilotAgent, AgentChain
 from app.chain.message import MessageChain
 from app.core.config import settings
-from app.helper.llm import LLMHelper
-from app.helper.voice import VoiceHelper
+from app.agent.llm import LLMHelper
 from app.modules.discord import DiscordModule
 from app.modules.qqbot import QQBotModule
 from app.modules.slack import SlackModule
@@ -218,7 +216,7 @@ class AgentImageSupportTest(unittest.TestCase):
 
         handle_ai_message.assert_called_once()
 
-    def test_audio_message_routes_to_agent_with_voice_reply_flag(self):
+    def test_audio_message_routes_to_agent_without_forcing_voice_reply(self):
         chain = MessageChain()
 
         with patch.object(chain, "load_cache", return_value={}), patch.object(
@@ -226,18 +224,21 @@ class AgentImageSupportTest(unittest.TestCase):
         ), patch.object(chain.messagehelper, "put"), patch.object(
             chain.messageoper, "add"
         ), patch.object(chain, "_handle_ai_message") as handle_ai_message:
-            chain.handle_message(
-                channel=MessageChannel.Telegram,
-                source="telegram-test",
-                userid="10001",
-                username="tester",
-                text="",
-                audio_refs=["tg://voice_file_id/voice-1"],
-            )
+            with patch.object(settings, "AI_AGENT_ENABLE", True), patch.object(
+                settings, "AI_AGENT_GLOBAL", False
+            ):
+                chain.handle_message(
+                    channel=MessageChannel.Telegram,
+                    source="telegram-test",
+                    userid="10001",
+                    username="tester",
+                    text="",
+                    audio_refs=["tg://voice_file_id/voice-1"],
+                )
 
         handle_ai_message.assert_called_once()
         self.assertEqual(handle_ai_message.call_args.kwargs["text"], "帮我推荐一部电影")
-        self.assertTrue(handle_ai_message.call_args.kwargs["reply_with_voice"])
+        self.assertNotIn("reply_with_voice", handle_ai_message.call_args.kwargs)
 
     def test_file_message_routes_to_agent_even_when_global_agent_is_disabled(self):
         chain = MessageChain()
@@ -319,7 +320,7 @@ class AgentImageSupportTest(unittest.TestCase):
             ],
         )
 
-    def test_agent_send_agent_message_does_not_auto_convert_to_voice(self):
+    def test_agent_send_agent_message_keeps_default_text_reply(self):
         agent = MoviePilotAgent(
             session_id="session-1",
             user_id="user-1",
@@ -327,7 +328,6 @@ class AgentImageSupportTest(unittest.TestCase):
             source="telegram-test",
             username="tester",
         )
-        agent.reply_with_voice = True
 
         with patch.object(
             AgentChain, "async_post_message", new_callable=AsyncMock
@@ -338,6 +338,7 @@ class AgentImageSupportTest(unittest.TestCase):
 
         notification = async_post_message.await_args.args[0]
         self.assertIsNone(notification.voice_path)
+        self.assertIsNone(notification.voice_caption)
         self.assertEqual(notification.text, "这是语音回复")
 
     def test_agent_process_wraps_request_as_structured_json(self):
