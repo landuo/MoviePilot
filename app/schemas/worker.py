@@ -64,3 +64,32 @@ class TransferResult(BaseModel):
     mode: str
     bytes: int = 0
     duration_ms: int = 0
+
+
+# ---------- mp-indexer ----------
+
+class FetchItem(BaseModel):
+    """mp-indexer 批量 HTTP 请求中的单项"""
+
+    id: str = Field(description="请求标识，用于关联响应")
+    url: str
+    method: str = "GET"
+    headers: dict = Field(default_factory=dict)
+    proxy: str = ""
+    timeout_ms: int = 15000
+    allow_redirects: bool = True
+
+class FetchRequest(BaseModel):
+    """mp-indexer 的 POST /api/v1/fetch 请求载荷"""
+
+    requests: list[FetchItem]
+
+class FetchResultItem(BaseModel):
+    """mp-indexer 批量 HTTP 响应中的单项"""
+
+    id: str
+    status_code: int = 0
+    headers: dict = Field(default_factory=dict)
+    body: str = ""
+    error: str = ""
+    duration_ms: int = 0

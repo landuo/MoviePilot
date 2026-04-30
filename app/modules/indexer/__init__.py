@@ -362,6 +362,11 @@ class IndexerModule(_ModuleBase):
                              page=page)
 
         try:
+            # 尝试通过 mp-indexer worker 加速 HTTP 请求
+            html = IndexerModule.__try_worker_fetch(_spider)
+            if html is not None:
+                return _spider.is_error, _spider.parse(html)
+            # Fallback：走原有 Python HTTP 请求
             return _spider.is_error, _spider.get_torrents()
         finally:
             del _spider
@@ -389,10 +394,106 @@ class IndexerModule(_ModuleBase):
                              page=page)
 
         try:
+            # 尝试通过 mp-indexer worker 加速 HTTP 请求
+            html = IndexerModule.__try_worker_fetch(_spider)
+            if html is not None:
+                return _spider.is_error, _spider.parse(html)
+            # Fallback：走原有 Python 异步 HTTP 请求
             result = await _spider.async_get_torrents()
             return _spider.is_error, result
         finally:
             del _spider
+
+    @staticmethod
+    def __try_worker_fetch(spider: SiteSpider) -> Optional[str]:
+        """
+        尝试通过 mp-indexer worker 发送 HTTP 请求获取页面 HTML。
+
+        返回值约定：
+        - 返回 str：worker 成功获取到 HTML 原文，调用方直接 parse
+        - 返回 None：worker 不可用或调用失败，调用方应走原有 HTTP 路径
+        """
+        try:
+            from app.core.config import settings
+            from app.utils.worker_client import WorkerClientManager
+        except Exception:
+            return None
+
+        if not settings.is_worker_enabled("indexer"):
+            return None
+
+        client = WorkerClientManager().get("indexer")
+        if not client.is_available():
+            return None
+
+        # 从 spider 内部属性构造请求描述
+        if not spider.search or not spider.domain:
+            return None
+
+        # 访问私有方法获取搜索 URL（name mangling）
+        search_url = spider._SiteSpider__get_search_url()
+        if not search_url:
+            return None
+
+        # 构造请求头
+        headers = {}
+        if spider.ua:
+            headers["User-Agent"] = spider.ua
+        if spider.cookie:
+            headers["Cookie"] = spider.cookie
+        if spider.referer:
+            headers["Referer"] = spider.referer
+
+        # 代理
+        proxy = ""
+        if spider.proxies:
+            proxy = spider.proxies.get("https") or spider.proxies.get("http") or ""
+
+        timeout_ms = (spider._timeout or 15) * 1000
+
+        logger.info(f"通过 mp-indexer 请求：{search_url}")
+
+        try:
+            from app.schemas.worker import WorkerError
+            resp_data = client.call_or_raise(
+                "/api/v1/fetch",
+                {
+                    "requests": [{
+                        "id": spider.indexerid or "default",
+                        "url": search_url,
+                        "method": "GET",
+                        "headers": headers,
+                        "proxy": proxy,
+                        "timeout_ms": timeout_ms,
+                        "allow_redirects": True,
+                    }]
+                },
+            )
+        except Exception:
+            return None
+
+        # 从响应中提取 HTML
+        results = resp_data.get("results", []) if resp_data else []
+        if not results:
+            return None
+
+        item = results[0]
+        if item.get("error"):
+            logger.warn(f"mp-indexer 请求失败：{item['error']}")
+            spider.is_error = True
+            return None
+
+        status_code = item.get("status_code", 0)
+        if status_code != 200:
+            logger.warn(f"mp-indexer 返回状态码 {status_code}")
+            spider.is_error = True
+            return None
+
+        body = item.get("body", "")
+        if not body:
+            return None
+
+        return body
 
     def refresh_torrents(self, site: dict,
                          keyword: Optional[str] = None,

@@ -249,6 +249,22 @@ function start_workers() {
         fi
     fi
 
+    # mp-indexer
+    # 纯请求-响应模式，不需要 callback URL；Go 端并发 HTTP 代理加速站点索引
+    if should_start_worker "indexer"; then
+        local bin="/app/bin/mp-indexer"
+        if [ ! -x "${bin}" ]; then
+            WARN "→ mp-indexer 二进制不存在 (${bin})，跳过启动；Python 端将走 fallback"
+        else
+            gosu moviepilot:moviepilot "${bin}" \
+                --socket="${sock_dir}/mp-indexer.sock" \
+                --log-format=json \
+                > /dev/stdout 2> /dev/stderr &
+            WORKER_PIDS["indexer"]=$!
+            INFO "→ mp-indexer 已启动 (PID: ${WORKER_PIDS["indexer"]})"
+        fi
+    fi
+
     # 等待 socket 就绪（最多 10 秒），便于 Python 启动后立即可用
     local i=0
     while [ $i -lt 20 ]; do

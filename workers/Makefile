@@ -6,7 +6,7 @@
 #   make clean           清理构建产物
 #   make release         通过 goreleaser 多平台构建（需要安装 goreleaser）
 
-WORKERS := mp-watcher mp-transfer
+WORKERS := mp-watcher mp-transfer mp-indexer
 BIN_DIR := bin
 
 .PHONY: build clean release $(addprefix build-,$(WORKERS))
@@ -22,6 +22,11 @@ build-transfer:
 	@echo "→ Building mp-transfer..."
 	@mkdir -p $(BIN_DIR)
 	cd mp-transfer && go build -trimpath -ldflags "-s -w" -o ../$(BIN_DIR)/mp-transfer .
+
+build-indexer:
+	@echo "→ Building mp-indexer..."
+	@mkdir -p $(BIN_DIR)
+	cd mp-indexer && go build -trimpath -ldflags "-s -w" -o ../$(BIN_DIR)/mp-indexer .
 
 clean:
 	@echo "→ Cleaning build outputs..."

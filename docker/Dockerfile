@@ -99,7 +99,7 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
 # 本地编译产物从 prepare_code 阶段的 /app/workers/bin/ 拷贝
 RUN mkdir -p /app/bin \
     && WORKERS_VERSION=$(sed -n "s/^WORKERS_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
-    && for name in mp-watcher mp-transfer; do \
+    && for name in mp-watcher mp-transfer mp-indexer; do \
         local_bin="/app/workers/bin/${name}"; \
         if [ -x "${local_bin}" ]; then \
             cp -f "${local_bin}" "/app/bin/${name}"; \

@@ -14,7 +14,7 @@
 |---|---|---|
 | `mp-watcher`  | 本地目录文件监控（fsnotify） | P1-A 已交付 |
 | `mp-transfer` | 物理 IO 加速（copy/move/link/softlink，Linux 零拷贝） | P1-C 已交付 |
-| `mp-indexer`  | 多站点搜索调度 | P3（规划） |
+| `mp-indexer`  | HTTP 代理加速器（并发站点索引请求） | P3 已交付 |
 
 ## 目录结构
 
@@ -56,6 +56,7 @@ cd workers
 make build            # 构建当前平台所有 worker，产物在 workers/bin/
 make build-watcher    # 仅构建 mp-watcher
 make build-transfer   # 仅构建 mp-transfer
+make build-indexer    # 仅构建 mp-indexer
 make release          # 通过 goreleaser 多平台构建，产物在 workers/dist/
 ```
 
@@ -216,3 +217,98 @@ Linux 下使用 `copy_file_range` 走内核侧零拷贝；其他平台 fallback 
 - **不创建父目录**：与原 `SystemUtils` 行为一致，由调用方（`TransHandler`）保证 `dst` 父目录存在
 - **不抛异常给调用方**：`SystemUtils` 4 个方法的对外契约（返回 `(int, str)`）保持不变，
   worker 错误一律收敛到 fallback 分支
+
+---
+
+## mp-indexer
+
+HTTP 代理加速器，接管 `IndexerModule.__spider_search()` 中通用 SiteSpider 的 HTTP 请求。
+Go 端用 goroutine 并发执行多个 HTTP 请求（连接池 + TLS 会话复用），把 HTML 原文返回给 Python 解析。
+**只做 HTTP 请求代理**——URL 拼装、HTML 解析、TorrentInfo 构造全留 Python。
+
+### 启动参数
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `--socket` | ✅ | UDS 文件路径，例：`/config/sockets/mp-indexer.sock` |
+| `--callback-url` | ❌ | **不使用**（纯请求-响应模式，无主动推送） |
+| `--log-level` | ❌ | `debug` / `info`（默认）/ `warn` / `error` |
+| `--log-format` | ❌ | `json`（默认）/ `text` |
+
+### 业务接口
+
+#### `POST /api/v1/fetch`
+
+批量执行 HTTP 请求。Python 端将多个站点的搜索 URL + Cookie/UA/Proxy 打包发送，
+Go 端 goroutine 并发请求，所有请求完成后一次性返回结果。
+
+请求：
+```json
+{
+  "requests": [
+    {
+      "id": "site-123",
+      "url": "https://example.com/torrents.php?search=test",
+      "method": "GET",
+      "headers": {"User-Agent": "...", "Cookie": "...", "Referer": "..."},
+      "proxy": "http://proxy:port",
+      "timeout_ms": 15000,
+      "allow_redirects": true
+    }
+  ]
+}
+```
+
+响应：
+```json
+{
+  "code": 0, "message": "ok",
+  "data": {
+    "results": [
+      {
+        "id": "site-123",
+        "status_code": 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "body": "<html>...</html>",
+        "error": "",
+        "duration_ms": 1234
+      }
+    ],
+    "total_duration_ms": 3456
+  }
+}
+```
+
+字段说明：
+- `id`：请求标识，用于关联请求和响应
+- `method`：HTTP 方法（默认 `GET`）
+- `proxy`：代理地址（空字符串表示不使用代理）
+- `timeout_ms`：单请求超时毫秒（默认 15000）
+- `allow_redirects`：是否跟随重定向（默认 `true`）
+- `error`：非空表示该请求失败，Python 端应 fallback
+
+#### `GET /api/v1/fetch_stats`
+
+返回累计请求统计。
+
+响应：
+```json
+{"code": 0, "data": {
+  "total_requests": 1234, "failed_requests": 5, "bytes_total": 9876543,
+  "by_status": {"200": 1200, "403": 20, "0": 5}
+}}
+```
+
+### 设计要点
+
+- **方案 A（HTTP 代理加速器）**：Go 端只做并发 HTTP 请求调度 + 连接池管理，
+  不做任何业务逻辑（不解析 HTML、不构造搜索 URL、不处理分类映射）
+- **仅处理通用 SiteSpider**：特殊 Spider（TNode/TorrentLeech/MTorrent/Yema/Haidan/HDDolby/Rousi）
+  有各自独立的 HTTP 请求逻辑，仍走 Python 原有路径
+- **逐站点调用**：当前实现在 `IndexerModule.__spider_search()` 层面拦截，
+  每次调用发一个请求给 worker。虽然没有批量并发的优势，但释放了 Python GIL，
+  Go HTTP client 的连接池和 TLS 复用仍有收益
+- **Fallback 透明**：worker 不可用或请求失败时，自动退回到 Python 端 `RequestUtils.get_res()`，
+  对 `SearchChain` 和上层调用方完全透明
+- **TLS 证书验证跳过**：与 Python 端 `RequestUtils(verify=False)` 行为一致，
+  私有站点自签证书不影响请求
