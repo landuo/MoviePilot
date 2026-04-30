@@ -378,6 +378,10 @@ class IndexerModule(_ModuleBase):
 
         # 检查 worker 是否可用，不可用则全部走老路径
         use_worker = self.__is_indexer_worker_available()
+        # 可观测计数：worker 命中 / 单站点 fallback / 特殊 spider
+        worker_hit = 0
+        worker_miss = 0
+        start_ts = time.time()
 
         if use_worker and general_sites:
             # 批量获取通用站点的 HTML
@@ -390,11 +394,13 @@ class IndexerModule(_ModuleBase):
                 html = html_map.get(site_id) if html_map else None
                 if html:
                     # 走解析路径
+                    worker_hit += 1
                     results[site_id] = self.__parse_html_to_torrents(
                         site=site, html=html, keyword=keyword, mtype=mtype, cat=cat, page=page,
                     )
                 else:
                     # 该站点 worker 失败，单独 fallback
+                    worker_miss += 1
                     results[site_id] = self.search_torrents(
                         site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
                     ) or []
@@ -410,6 +416,20 @@ class IndexerModule(_ModuleBase):
             results[site.get("id")] = self.search_torrents(
                 site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
             ) or []
+
+        # 汇总日志：让运维 / 自测时直接看到"批量优化是否生效"
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        if use_worker:
+            logger.info(
+                f"[indexer-batch] 共 {len(sites)} 站点 | "
+                f"worker 命中 {worker_hit} | worker 失败回退 {worker_miss} | "
+                f"特殊 spider 直走 {len(special_sites)} | 耗时 {elapsed_ms}ms"
+            )
+        else:
+            logger.info(
+                f"[indexer-batch] 共 {len(sites)} 站点 | worker 不可用，全部走旧路径 | "
+                f"通用 {len(general_sites)} | 特殊 {len(special_sites)} | 耗时 {elapsed_ms}ms"
+            )
 
         return results
 
@@ -434,6 +454,9 @@ class IndexerModule(_ModuleBase):
         special_sites = [s for s in sites if s.get("parser") in self._SPECIAL_PARSERS]
 
         use_worker = self.__is_indexer_worker_available()
+        worker_hit = 0
+        worker_miss = 0
+        start_ts = time.time()
 
         if use_worker and general_sites:
             # 同步阻塞调用 worker，卸到线程池
@@ -445,12 +468,14 @@ class IndexerModule(_ModuleBase):
                 site_id = site.get("id")
                 html = html_map.get(site_id) if html_map else None
                 if html:
+                    worker_hit += 1
                     # 解析也卸到线程池（PyQuery 是 CPU 密集，会阻塞 event loop）
                     results[site_id] = await run_in_threadpool(
                         self.__parse_html_to_torrents,
                         site=site, html=html, keyword=keyword, mtype=mtype, cat=cat, page=page,
                     )
                 else:
+                    worker_miss += 1
                     results[site_id] = await self.async_search_torrents(
                         site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
                     ) or []
@@ -464,6 +489,19 @@ class IndexerModule(_ModuleBase):
             results[site.get("id")] = await self.async_search_torrents(
                 site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
             ) or []
+
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        if use_worker:
+            logger.info(
+                f"[indexer-batch-async] 共 {len(sites)} 站点 | "
+                f"worker 命中 {worker_hit} | worker 失败回退 {worker_miss} | "
+                f"特殊 spider 直走 {len(special_sites)} | 耗时 {elapsed_ms}ms"
+            )
+        else:
+            logger.info(
+                f"[indexer-batch-async] 共 {len(sites)} 站点 | worker 不可用，全部走旧路径 | "
+                f"通用 {len(general_sites)} | 特殊 {len(special_sites)} | 耗时 {elapsed_ms}ms"
+            )
 
         return results
 

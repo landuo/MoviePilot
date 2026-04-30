@@ -742,6 +742,7 @@ class SearchChain(ChainBase):
         # 优先尝试批量调用：mp-indexer 可用时一次 IPC 拿回所有通用站点的 HTML
         # IndexerModule.batch_search_torrents 内部已处理 worker 不可用的 fallback
         try:
+            logger.info(f"[search-chain] 调用 batch_search_torrents：{total_num} 个站点 / 关键词={actual_keyword!r} / 类型={actual_mtype}")
             site_results = self.batch_search_torrents(
                 sites=indexer_sites,
                 keyword=actual_keyword,
@@ -841,6 +842,7 @@ class SearchChain(ChainBase):
         # 优先尝试批量调用：mp-indexer 可用时一次 IPC 拿回所有通用站点的 HTML
         # IndexerModule.async_batch_search_torrents 内部已处理 worker 不可用的 fallback
         try:
+            logger.info(f"[search-chain-async] 调用 async_batch_search_torrents：{total_num} 个站点 / 关键词={actual_keyword!r} / 类型={actual_mtype}")
             site_results = await self.async_batch_search_torrents(
                 sites=indexer_sites,
                 keyword=actual_keyword,
