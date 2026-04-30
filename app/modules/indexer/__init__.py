@@ -339,6 +339,279 @@ class IndexerModule(_ModuleBase):
             seconds=seconds
         )
 
+    # 使用通用 SiteSpider（即非特殊 parser）的站点，可以走批量 worker 加速
+    _SPECIAL_PARSERS = frozenset({
+        "TNodeSpider", "TorrentLeech", "mTorrent",
+        "Yema", "Haidan", "HDDolby", "RousiPro",
+    })
+
+    def batch_search_torrents(self, sites: List[dict],
+                              keyword: str = None,
+                              mtype: MediaType = None,
+                              cat: Optional[str] = None,
+                              page: Optional[int] = 0) -> Dict[int, List[TorrentInfo]]:
+        """
+        批量搜索多个站点。
+
+        优化路径（mp-indexer 可用时）：
+          1. 把使用通用 SiteSpider 的站点拼一次 worker 调用，Go 端 goroutine 并发拿 HTML
+          2. Python 端按站点并行解析 HTML（CPU 密集，多线程仍有收益）
+          3. 特殊 Spider 站点和 worker 失败的站点 fallback 到 search_torrents 单站点路径
+
+        Fallback 路径（worker 不可用时）：
+          全部站点走 search_torrents 原路径（调用方负责并发调度）
+
+        :param sites:  站点配置列表
+        :param keyword:  搜索关键词
+        :param mtype:  媒体类型
+        :param cat:  分类
+        :param page:  页码
+        :return: {site_id: [TorrentInfo, ...]} 站点 ID → 资源列表
+        """
+        results: Dict[int, List[TorrentInfo]] = {}
+        if not sites:
+            return results
+
+        # 预筛：通用 SiteSpider 的站点 vs 特殊 Spider 的站点
+        general_sites = [s for s in sites if s.get("parser") not in self._SPECIAL_PARSERS]
+        special_sites = [s for s in sites if s.get("parser") in self._SPECIAL_PARSERS]
+
+        # 检查 worker 是否可用，不可用则全部走老路径
+        use_worker = self.__is_indexer_worker_available()
+
+        if use_worker and general_sites:
+            # 批量获取通用站点的 HTML
+            html_map = self.__batch_fetch_html(
+                sites=general_sites, keyword=keyword, mtype=mtype, cat=cat, page=page,
+            )
+            # 解析 HTML / 单站点 fallback
+            for site in general_sites:
+                site_id = site.get("id")
+                html = html_map.get(site_id) if html_map else None
+                if html:
+                    # 走解析路径
+                    results[site_id] = self.__parse_html_to_torrents(
+                        site=site, html=html, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                    )
+                else:
+                    # 该站点 worker 失败，单独 fallback
+                    results[site_id] = self.search_torrents(
+                        site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                    ) or []
+        else:
+            # worker 不可用：通用站点也走老路径
+            for site in general_sites:
+                results[site.get("id")] = self.search_torrents(
+                    site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                ) or []
+
+        # 特殊 Spider 始终走老路径
+        for site in special_sites:
+            results[site.get("id")] = self.search_torrents(
+                site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+            ) or []
+
+        return results
+
+    async def async_batch_search_torrents(self, sites: List[dict],
+                                          keyword: str = None,
+                                          mtype: MediaType = None,
+                                          cat: Optional[str] = None,
+                                          page: Optional[int] = 0) -> Dict[int, List[TorrentInfo]]:
+        """
+        异步批量搜索多个站点。
+
+        语义与 batch_search_torrents 完全一致，仅在 fallback 时使用 async_search_torrents。
+        worker 调用本身是阻塞的（HTTP over UDS），通过 run_in_threadpool 卸到线程池避免阻塞 event loop。
+
+        :return: {site_id: [TorrentInfo, ...]}
+        """
+        results: Dict[int, List[TorrentInfo]] = {}
+        if not sites:
+            return results
+
+        general_sites = [s for s in sites if s.get("parser") not in self._SPECIAL_PARSERS]
+        special_sites = [s for s in sites if s.get("parser") in self._SPECIAL_PARSERS]
+
+        use_worker = self.__is_indexer_worker_available()
+
+        if use_worker and general_sites:
+            # 同步阻塞调用 worker，卸到线程池
+            html_map = await run_in_threadpool(
+                self.__batch_fetch_html,
+                sites=general_sites, keyword=keyword, mtype=mtype, cat=cat, page=page,
+            )
+            for site in general_sites:
+                site_id = site.get("id")
+                html = html_map.get(site_id) if html_map else None
+                if html:
+                    # 解析也卸到线程池（PyQuery 是 CPU 密集，会阻塞 event loop）
+                    results[site_id] = await run_in_threadpool(
+                        self.__parse_html_to_torrents,
+                        site=site, html=html, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                    )
+                else:
+                    results[site_id] = await self.async_search_torrents(
+                        site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                    ) or []
+        else:
+            for site in general_sites:
+                results[site.get("id")] = await self.async_search_torrents(
+                    site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                ) or []
+
+        for site in special_sites:
+            results[site.get("id")] = await self.async_search_torrents(
+                site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+            ) or []
+
+        return results
+
+    @staticmethod
+    def __is_indexer_worker_available() -> bool:
+        """快速判断 mp-indexer worker 是否可用（不发请求）"""
+        try:
+            from app.core.config import settings
+            from app.utils.worker_client import WorkerClientManager
+        except Exception:
+            return False
+        if not settings.is_worker_enabled("indexer"):
+            return False
+        client = WorkerClientManager().get("indexer")
+        return client.is_available()
+
+    def __batch_fetch_html(self, sites: List[dict],
+                           keyword: str = None,
+                           mtype: MediaType = None,
+                           cat: Optional[str] = None,
+                           page: Optional[int] = 0) -> Dict[int, str]:
+        """
+        通过 mp-indexer worker 批量获取多个站点的 HTML 原文。
+
+        :return: {site_id: html_str}，缺失的 site_id 表示该站点 worker 失败需 fallback
+        """
+        from app.utils.worker_client import WorkerClientManager
+
+        # 为每个站点构造 SiteSpider，提取 URL + headers + proxy
+        # 同时需要做 search_check / clear_search_text 等前置检查（与 search_torrents 对齐）
+        search_word = self.__clear_search_text(keyword)
+
+        request_items = []
+        spiders_by_id: Dict[int, SiteSpider] = {}
+
+        for site in sites:
+            site_id = site.get("id")
+            if not self.__search_check(site, keyword):
+                continue
+
+            spider = SiteSpider(
+                indexer=site, keyword=search_word, mtype=mtype, cat=cat, page=page,
+            )
+            if not spider.search or not spider.domain:
+                continue
+
+            try:
+                search_url = spider._SiteSpider__get_search_url()
+            except Exception as err:
+                logger.warn(f"{site.get('name')} 构造搜索 URL 失败：{str(err)}")
+                continue
+            if not search_url:
+                continue
+
+            headers = {}
+            if spider.ua:
+                headers["User-Agent"] = spider.ua
+            if spider.cookie:
+                headers["Cookie"] = spider.cookie
+            if spider.referer:
+                headers["Referer"] = spider.referer
+
+            proxy = ""
+            if spider.proxies:
+                proxy = spider.proxies.get("https") or spider.proxies.get("http") or ""
+
+            request_items.append({
+                "id": str(site_id),
+                "url": search_url,
+                "method": "GET",
+                "headers": headers,
+                "proxy": proxy,
+                "timeout_ms": (spider._timeout or 15) * 1000,
+                "allow_redirects": True,
+            })
+            spiders_by_id[site_id] = spider
+
+        if not request_items:
+            return {}
+
+        client = WorkerClientManager().get("indexer")
+        logger.info(f"通过 mp-indexer 批量请求 {len(request_items)} 个站点")
+
+        try:
+            resp_data = client.call_or_raise(
+                "/api/v1/fetch", {"requests": request_items},
+            )
+        except Exception as err:
+            logger.warn(f"mp-indexer 批量请求失败：{str(err)}，全部 fallback")
+            return {}
+
+        # 解析响应：成功的填入 html_map，失败的不填（让调用方 fallback）
+        html_map: Dict[int, str] = {}
+        for item in (resp_data or {}).get("results", []) or []:
+            try:
+                site_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            spider = spiders_by_id.get(site_id)
+            if not spider:
+                continue
+            err = item.get("error", "")
+            if err:
+                logger.warn(f"mp-indexer 站点 {site_id} 请求失败：{err}")
+                spider.is_error = True
+                continue
+            status_code = item.get("status_code", 0)
+            if status_code != 200:
+                logger.warn(f"mp-indexer 站点 {site_id} 状态码 {status_code}")
+                spider.is_error = True
+                continue
+            body = item.get("body", "")
+            if not body:
+                continue
+            html_map[site_id] = body
+        return html_map
+
+    def __parse_html_to_torrents(self, site: dict, html: str,
+                                 keyword: str = None,
+                                 mtype: MediaType = None,
+                                 cat: Optional[str] = None,
+                                 page: Optional[int] = 0) -> List[TorrentInfo]:
+        """
+        用预取的 HTML 解析单站点结果，复用 SiteSpider.parse 逻辑。
+        与 search_torrents 的统计/日志/封装行为对齐。
+        """
+        start_time = datetime.now()
+        error_flag = False
+        result_array = []
+
+        search_word = self.__clear_search_text(keyword)
+        spider = SiteSpider(
+            indexer=site, keyword=search_word, mtype=mtype, cat=cat, page=page,
+        )
+        try:
+            try:
+                result_array = spider.parse(html)
+                error_flag = spider.is_error
+            except Exception as err:
+                logger.error(f"{site.get('name')} 解析出错：{str(err)}")
+                error_flag = True
+        finally:
+            del spider
+
+        seconds = (datetime.now() - start_time).seconds
+        self.__indexer_statistic(site=site, error_flag=error_flag, seconds=seconds)
+        return self.__parse_result(site=site, result_array=result_array, seconds=seconds)
+
     @staticmethod
     def __spider_search(indexer: dict,
                         search_word: Optional[str] = None,

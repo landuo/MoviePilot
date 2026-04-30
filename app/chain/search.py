@@ -734,33 +734,50 @@ class SearchChain(ChainBase):
                         text=f"开始搜索，共 {total_num} 个站点 ...")
         # 结果集
         results = []
-        # 多线程
-        with ThreadPoolExecutor(max_workers=len(indexer_sites)) as executor:
-            all_task = []
+
+        # 实际搜索关键词（imdbid 模式下使用 imdb_id）
+        actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
+        actual_mtype = mediainfo.type if mediainfo else None
+
+        # 优先尝试批量调用：mp-indexer 可用时一次 IPC 拿回所有通用站点的 HTML
+        # IndexerModule.batch_search_torrents 内部已处理 worker 不可用的 fallback
+        try:
+            site_results = self.batch_search_torrents(
+                sites=indexer_sites,
+                keyword=actual_keyword,
+                mtype=actual_mtype,
+                page=page,
+            )
+            # 按 indexer_sites 顺序汇总，并按"站点完成"模式更新进度
             for site in indexer_sites:
-                if area == "imdbid":
-                    # 搜索IMDBID
-                    task = executor.submit(self.search_torrents, site=site,
-                                           keyword=mediainfo.imdb_id if mediainfo else None,
-                                           mtype=mediainfo.type if mediainfo else None,
-                                           page=page)
-                else:
-                    # 搜索标题
-                    task = executor.submit(self.search_torrents, site=site,
-                                           keyword=keyword,
-                                           mtype=mediainfo.type if mediainfo else None,
-                                           page=page)
-                all_task.append(task)
-            for future in as_completed(all_task):
                 if global_vars.is_system_stopped:
                     break
                 finish_count += 1
-                result = future.result()
+                result = site_results.get(site.get("id")) or []
                 if result:
                     results.extend(result)
                 logger.info(f"站点搜索进度：{finish_count} / {total_num}")
                 progress.update(value=finish_count / total_num * 100,
                                 text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个站点 ...")
+        except AttributeError:
+            # 非 IndexerModule（理论上不会发生，但保留多线程旧路径作为最终兜底）
+            with ThreadPoolExecutor(max_workers=len(indexer_sites)) as executor:
+                all_task = [
+                    executor.submit(self.search_torrents, site=site,
+                                    keyword=actual_keyword, mtype=actual_mtype, page=page)
+                    for site in indexer_sites
+                ]
+                for future in as_completed(all_task):
+                    if global_vars.is_system_stopped:
+                        break
+                    finish_count += 1
+                    result = future.result()
+                    if result:
+                        results.extend(result)
+                    logger.info(f"站点搜索进度：{finish_count} / {total_num}")
+                    progress.update(value=finish_count / total_num * 100,
+                                    text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个站点 ...")
+
         # 计算耗时
         end_time = datetime.now()
         # 更新进度
@@ -817,34 +834,49 @@ class SearchChain(ChainBase):
         # 结果集
         results = []
 
-        # 创建异步任务列表
-        tasks = []
-        for site in indexer_sites:
-            if area == "imdbid":
-                # 搜索IMDBID
-                task = self.async_search_torrents(site=site,
-                                                  keyword=mediainfo.imdb_id if mediainfo else None,
-                                                  mtype=mediainfo.type if mediainfo else None,
-                                                  page=page)
-            else:
-                # 搜索标题
-                task = self.async_search_torrents(site=site,
-                                                  keyword=keyword,
-                                                  mtype=mediainfo.type if mediainfo else None,
-                                                  page=page)
-            tasks.append(task)
+        # 实际搜索关键词（imdbid 模式下使用 imdb_id）
+        actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
+        actual_mtype = mediainfo.type if mediainfo else None
 
-        # 使用asyncio.as_completed来处理并发任务
-        for future in asyncio.as_completed(tasks):
-            if global_vars.is_system_stopped:
-                break
-            finish_count += 1
-            result = await future
-            if result:
-                results.extend(result)
-            logger.info(f"站点搜索进度：{finish_count} / {total_num}")
-            progress.update(value=finish_count / total_num * 100,
-                            text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个站点 ...")
+        # 优先尝试批量调用：mp-indexer 可用时一次 IPC 拿回所有通用站点的 HTML
+        # IndexerModule.async_batch_search_torrents 内部已处理 worker 不可用的 fallback
+        try:
+            site_results = await self.async_batch_search_torrents(
+                sites=indexer_sites,
+                keyword=actual_keyword,
+                mtype=actual_mtype,
+                page=page,
+            )
+            # 按 indexer_sites 顺序汇总，并按"站点完成"模式更新进度
+            for site in indexer_sites:
+                if global_vars.is_system_stopped:
+                    break
+                finish_count += 1
+                result = site_results.get(site.get("id")) or []
+                if result:
+                    results.extend(result)
+                logger.info(f"站点搜索进度：{finish_count} / {total_num}")
+                progress.update(value=finish_count / total_num * 100,
+                                text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个站点 ...")
+        except AttributeError:
+            # 非 IndexerModule（理论上不会发生，但保留 asyncio.as_completed 旧路径作为最终兜底）
+            tasks = [
+                self.async_search_torrents(site=site,
+                                           keyword=actual_keyword,
+                                           mtype=actual_mtype,
+                                           page=page)
+                for site in indexer_sites
+            ]
+            for future in asyncio.as_completed(tasks):
+                if global_vars.is_system_stopped:
+                    break
+                finish_count += 1
+                result = await future
+                if result:
+                    results.extend(result)
+                logger.info(f"站点搜索进度：{finish_count} / {total_num}")
+                progress.update(value=finish_count / total_num * 100,
+                                text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个站点 ...")
 
         # 计算耗时
         end_time = datetime.now()

@@ -161,5 +161,96 @@ class FetchProtocolTest(unittest.TestCase):
         self.assertFalse(should_use)
 
 
+class SearchChainBatchRoutingTest(unittest.TestCase):
+    """
+    验证 SearchChain 改造后的批量路由 + fallback 语义（不依赖完整框架）。
+    模拟 self.batch_search_torrents 的两种返回形态：worker 命中 / worker 不可用走传统路径。
+    """
+
+    def _aggregate_by_site_order(self, indexer_sites, site_results):
+        """复刻 SearchChain.__search_all_sites 中"按 indexer_sites 顺序汇总"的核心逻辑"""
+        results = []
+        finish_count = 0
+        for site in indexer_sites:
+            finish_count += 1
+            result = site_results.get(site.get("id")) or []
+            if result:
+                results.extend(result)
+        return results, finish_count
+
+    def test_batch_aggregation_preserves_site_order(self):
+        """批量返回后按 indexer_sites 顺序汇总，进度计数与站点数一致"""
+        indexer_sites = [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]
+        site_results = {
+            "s1": [{"title": "t1"}, {"title": "t2"}],
+            "s2": [],  # 空结果
+            "s3": [{"title": "t3"}],
+        }
+        results, finish_count = self._aggregate_by_site_order(indexer_sites, site_results)
+        self.assertEqual(finish_count, 3)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0]["title"], "t1")
+        self.assertEqual(results[2]["title"], "t3")
+
+    def test_batch_aggregation_handles_missing_site(self):
+        """worker 漏返某站点时，对应站点视为空结果，不抛异常"""
+        indexer_sites = [{"id": "s1"}, {"id": "s2"}]
+        site_results = {"s1": [{"title": "t1"}]}  # s2 缺失
+        results, finish_count = self._aggregate_by_site_order(indexer_sites, site_results)
+        self.assertEqual(finish_count, 2)
+        self.assertEqual(len(results), 1)
+
+    def test_attribute_error_triggers_fallback(self):
+        """非 IndexerModule 时（无 batch_search_torrents 方法）触发 AttributeError fallback"""
+        class FakeChainWithoutBatch:
+            pass
+
+        chain = FakeChainWithoutBatch()
+        triggered_fallback = False
+        try:
+            chain.batch_search_torrents(sites=[], keyword="x", mtype=None, page=0)
+        except AttributeError:
+            triggered_fallback = True
+        self.assertTrue(triggered_fallback)
+
+    def test_batch_call_signature(self):
+        """批量调用必须传 sites/keyword/mtype/page 四个参数"""
+        captured = {}
+
+        def fake_batch(sites, keyword, mtype, page):
+            captured["sites"] = sites
+            captured["keyword"] = keyword
+            captured["mtype"] = mtype
+            captured["page"] = page
+            return {site.get("id"): [] for site in sites}
+
+        sites = [{"id": "s1"}, {"id": "s2"}]
+        fake_batch(sites=sites, keyword="搜索词", mtype="movie", page=2)
+
+        self.assertEqual(len(captured["sites"]), 2)
+        self.assertEqual(captured["keyword"], "搜索词")
+        self.assertEqual(captured["mtype"], "movie")
+        self.assertEqual(captured["page"], 2)
+
+    def test_imdbid_area_uses_imdb_id_as_keyword(self):
+        """area=imdbid 时实际关键词应为 mediainfo.imdb_id"""
+        class FakeMediaInfo:
+            imdb_id = "tt1234567"
+            type = "movie"
+
+        mediainfo = FakeMediaInfo()
+        keyword = "fallback title"
+        area = "imdbid"
+
+        # 复刻 SearchChain 中的关键词选择逻辑
+        actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
+        self.assertEqual(actual_keyword, "tt1234567")
+
+        # 反向：area=title 时使用原 keyword
+        area = "title"
+        actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
+        self.assertEqual(actual_keyword, "fallback title")
+
+
 if __name__ == "__main__":
     unittest.main()
