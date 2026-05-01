@@ -824,6 +824,29 @@ class ChainBase(metaclass=ABCMeta):
             "async_search_torrents", site=site, keyword=keyword, mtype=mtype, page=page
         )
 
+    async def async_worker_search_site(
+            self,
+            site: dict,
+            keyword: Optional[str] = None,
+            mtype: Optional[MediaType] = None,
+            cat: Optional[str] = None,
+            page: Optional[int] = 0,
+    ) -> List[TorrentInfo]:
+        """
+        单站点真异步搜索入口（流式批量化使用，转发到 IndexerModule）
+        worker 优先 + 失败 fallback 到 async_search_torrents，由 IndexerModule 实现保证
+        :param site:  站点
+        :param keyword:  搜索关键词
+        :param mtype:  媒体类型
+        :param cat:  分类
+        :param page:  页码
+        :return: 资源列表
+        """
+        return await self.async_run_module(
+            "async_worker_search_site",
+            site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+        )
+
     def refresh_torrents(
             self,
             site: dict,
