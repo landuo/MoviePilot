@@ -7,6 +7,13 @@ on:
     paths:
       - 'version.py'
 
+# 声明所需权限：
+# - packages: write   推送镜像到 ghcr.io 必需
+# - contents: write   末尾 softprops/action-gh-release 创建 Release 必需
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   Docker-build:
     runs-on: ubuntu-latest

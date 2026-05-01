@@ -2,6 +2,11 @@ name: MoviePilot Builder Beta
 on:
   workflow_dispatch:
 
+# 声明所需权限：packages: write 用于推送镜像到 ghcr.io
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   Docker-build:
     runs-on: ubuntu-latest
