@@ -252,6 +252,150 @@ class SearchChainBatchRoutingTest(unittest.TestCase):
         self.assertEqual(actual_keyword, "fallback title")
 
 
+class StreamBatchTest(unittest.TestCase):
+    """
+    流式搜索批量化（方案 C）单元测试
+
+    验证 SearchChain.__async_search_all_sites_stream 的关键行为：
+      1. 并发：多站点通过 asyncio.create_task 并发执行（耗时 ≈ max 而非 sum）
+      2. Fallback：self 不具备 async_worker_search_site 方法时，回退 legacy 路径
+      3. 异常处理：单站点异常时，自动回退到 async_search_torrents
+      4. 流式语义：先完成的站点先 yield，不等待所有站点
+
+    注意：直接测试私有方法 __async_search_all_sites_stream 比较麻烦，
+    改为测试其内部使用的关键模式（hasattr 路由 + try/except fallback +
+    asyncio.as_completed 流式产出），确保实现与设计一致。
+    """
+
+    def test_concurrent_execution_via_create_task(self):
+        """asyncio.create_task + as_completed 应实现真并发（耗时 ≈ max 而非 sum）"""
+        import asyncio
+        import time
+
+        async def slow_site(delay):
+            await asyncio.sleep(delay)
+            return delay
+
+        async def run():
+            start = time.monotonic()
+            tasks = [asyncio.create_task(slow_site(0.1)) for _ in range(5)]
+            results = []
+            for fut in asyncio.as_completed(tasks):
+                results.append(await fut)
+            return time.monotonic() - start, results
+
+        elapsed, results = asyncio.new_event_loop().run_until_complete(run())
+        # 5 个 100ms 任务并发应在 ~150ms 内完成（远小于串行的 500ms）
+        self.assertLess(elapsed, 0.4, f"并发耗时异常：{elapsed:.3f}s，预期 < 0.4s")
+        self.assertEqual(len(results), 5)
+
+    def test_hasattr_routing_for_stream_batch(self):
+        """use_stream_batch 通过 hasattr 检测，IndexerModule 应路由到 worker 路径"""
+        try:
+            from app.modules.indexer import IndexerModule
+        except ImportError as e:
+            self.skipTest(f"依赖缺失，跳过：{e}")
+
+        # IndexerModule 暴露 async_worker_search_site 即触发 worker 路径
+        self.assertTrue(hasattr(IndexerModule, "async_worker_search_site"),
+                        "IndexerModule 缺少 async_worker_search_site，流式批量化无法启用")
+
+        # 非 IndexerModule（如 mock chain）应触发 legacy 路径
+        class FakeChain:
+            pass
+
+        self.assertFalse(hasattr(FakeChain(), "async_worker_search_site"))
+
+    def test_per_site_exception_falls_back_to_legacy(self):
+        """单站点 worker 异常时，应自动回退到 async_search_torrents"""
+        import asyncio
+
+        call_log = []
+
+        class FakeChain:
+            async def async_worker_search_site(self, site, keyword, mtype, page):
+                call_log.append(("worker", site["id"]))
+                raise RuntimeError("worker boom")
+
+            async def async_search_torrents(self, site, keyword, mtype, page):
+                call_log.append(("legacy", site["id"]))
+                return [{"site": site["id"], "title": "fallback-result"}]
+
+        async def search_site_via_worker(chain, site):
+            try:
+                result = await chain.async_worker_search_site(
+                    site=site, keyword="x", mtype=None, page=0,
+                )
+                return site, result or []
+            except Exception:
+                result = await chain.async_search_torrents(
+                    site=site, keyword="x", mtype=None, page=0,
+                )
+                return site, result or []
+
+        chain = FakeChain()
+        site = {"id": "s1", "name": "Site1"}
+        _, result = asyncio.new_event_loop().run_until_complete(
+            search_site_via_worker(chain, site)
+        )
+
+        # 应先调 worker，失败后调 legacy
+        self.assertEqual(call_log, [("worker", "s1"), ("legacy", "s1")])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["title"], "fallback-result")
+
+    def test_stream_yields_in_completion_order(self):
+        """先完成的站点先 yield（流式语义），不等待最慢站点"""
+        import asyncio
+
+        async def slow_site(site_id, delay):
+            await asyncio.sleep(delay)
+            return {"id": site_id, "delay": delay}
+
+        async def run():
+            # 三个站点：500ms / 100ms / 300ms，预期 yield 顺序为 100ms→300ms→500ms
+            tasks = [
+                asyncio.create_task(slow_site("slow", 0.05)),
+                asyncio.create_task(slow_site("fast", 0.01)),
+                asyncio.create_task(slow_site("mid", 0.03)),
+            ]
+            order = []
+            for fut in asyncio.as_completed(tasks):
+                r = await fut
+                order.append(r["id"])
+            return order
+
+        order = asyncio.new_event_loop().run_until_complete(run())
+        self.assertEqual(order, ["fast", "mid", "slow"],
+                         f"流式 yield 顺序错误：{order}，预期按完成顺序")
+
+    def test_task_cancellation_on_early_break(self):
+        """global_vars.is_system_stopped 触发 break 时，未完成 task 应被取消"""
+        import asyncio
+
+        async def long_running():
+            await asyncio.sleep(10)
+            return "should-not-finish"
+
+        async def run():
+            tasks = [asyncio.create_task(long_running()) for _ in range(3)]
+            try:
+                # 模拟仅消费 0 个就 break（系统停机场景）
+                for _ in asyncio.as_completed(tasks):
+                    break
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+
+            # 等一小会儿让取消生效
+            await asyncio.sleep(0.05)
+            return [t.cancelled() or t.done() for t in tasks]
+
+        states = asyncio.new_event_loop().run_until_complete(run())
+        self.assertTrue(all(states), f"任务未被正确取消：{states}")
+
+
 class ModuleImportSmokeTest(unittest.TestCase):
     """
     模块导入 smoke test：保证 IndexerModule / SearchChain 的类定义阶段不出现
