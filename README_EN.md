@@ -29,6 +29,59 @@ Release channel: https://t.me/moviepilot_channel
 
 Official wiki: https://wiki.movie-pilot.org
 
+## Go Worker Acceleration (Enabled by Default)
+
+To accelerate high-frequency tasks such as site searching, filesystem watching and file transfers, this project ships with several Go-based worker sub-processes (`mp-watcher` / `mp-transfer` / `mp-indexer`). They communicate with the Python main process via Unix Domain Sockets, significantly reducing GIL contention and improving concurrency.
+
+**Container defaults (since v2)**:
+
+- `WORKER_MODE` defaults to `hybrid`
+- `WORKER_ENABLED` defaults to `watcher,transfer,indexer`
+
+The container will start the matching Go processes automatically. If a binary is missing or a worker crashes, the Python side **transparently falls back** to its original implementation — existing users experience zero disruption when upgrading.
+
+### How to Switch Back to Pure Python Mode
+
+To disable all Go workers and force the original Python paths, explicitly set `WORKER_MODE=python`:
+
+**Option 1: `docker run` flag**
+
+```shell
+docker run -d \
+  -e WORKER_MODE=python \
+  ...other flags... \
+  jxxghp/moviepilot-v2:latest
+```
+
+**Option 2: `docker-compose.yml`**
+
+```yaml
+services:
+  moviepilot:
+    image: jxxghp/moviepilot-v2:latest
+    environment:
+      - WORKER_MODE=python
+```
+
+**Option 3: `${CONFIG_DIR}/app.env` config file**
+
+```env
+WORKER_MODE='python'
+```
+
+### Enabling Workers Selectively
+
+To enable only a subset of workers, keep `hybrid` mode and list the desired workers in `WORKER_ENABLED`:
+
+```shell
+# Search acceleration only
+-e WORKER_MODE=hybrid -e WORKER_ENABLED=indexer
+
+# Search + filesystem watcher
+-e WORKER_MODE=hybrid -e WORKER_ENABLED=indexer,watcher
+```
+
+For detailed worker architecture and development docs see [`workers/README.md`](workers/README.md).
 
 ## Local CLI
 

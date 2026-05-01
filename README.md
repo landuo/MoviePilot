@@ -31,6 +31,59 @@
 
 官方Wiki：https://wiki.movie-pilot.org
 
+## Go Worker 加速（默认启用）
+
+为提升搜索、文件监控、文件转移等高频任务的性能，本项目内置了若干 Go 编写的 Worker 子进程（`mp-watcher` / `mp-transfer` / `mp-indexer`），通过 Unix Domain Socket 与 Python 主进程通信，能显著降低 GIL 竞争并提升并发度。
+
+**容器默认行为（v2 起）**：
+
+- `WORKER_MODE` 默认值为 `hybrid`
+- `WORKER_ENABLED` 默认启用 `watcher,transfer,indexer` 三个 Worker
+
+容器启动时会自动拉起对应的 Go 进程；若二进制不存在或运行异常，Python 端会自动 **fallback** 到原有路径，**对业务完全透明**，老用户升级零感知。
+
+### 如何切回纯 Python 模式
+
+如需禁用所有 Go Worker、强制走原 Python 实现，只需将 `WORKER_MODE` 显式设为 `python`：
+
+**方式一：docker run 命令行**
+
+```shell
+docker run -d \
+  -e WORKER_MODE=python \
+  ...其它参数... \
+  jxxghp/moviepilot-v2:latest
+```
+
+**方式二：docker-compose.yml**
+
+```yaml
+services:
+  moviepilot:
+    image: jxxghp/moviepilot-v2:latest
+    environment:
+      - WORKER_MODE=python
+```
+
+**方式三：`${CONFIG_DIR}/app.env` 配置文件**
+
+```env
+WORKER_MODE='python'
+```
+
+### 按需启用部分 Worker
+
+若仅希望启用其中部分 Worker，保持 `hybrid` 模式并通过 `WORKER_ENABLED` 指定即可：
+
+```shell
+# 仅启用搜索加速
+-e WORKER_MODE=hybrid -e WORKER_ENABLED=indexer
+
+# 启用搜索 + 文件监控
+-e WORKER_MODE=hybrid -e WORKER_ENABLED=indexer,watcher
+```
+
+详细的 Worker 架构与开发文档见 [`workers/README.md`](workers/README.md)。
 
 ## 本地 CLI
 
