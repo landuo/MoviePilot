@@ -56,5 +56,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 让 worker 二进制下载地址自动指向当前仓库（fork 自给自足）
+          # 上游主仓库跑此 workflow 时 ${{ github.repository }} = jxxghp/MoviePilot；
+          # 任何 fork 跑时则指向 fork 自身。需配合 build-workers.yml 已发布对应 release。
+          build-args: |
+            WORKERS_REPO=${{ github.repository }}
           cache-from: type=gha, scope=${{ github.workflow }}-docker
           cache-to: type=gha, scope=${{ github.workflow }}-docker

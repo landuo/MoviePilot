@@ -97,6 +97,13 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
 # 2. GitHub Release：仅当 version.py 的 WORKERS_VERSION 非空时尝试下载
 # 3. 都没有：跳过，运行时 Python 自动 fallback
 # 本地编译产物从 prepare_code 阶段的 /app/workers/bin/ 拷贝
+#
+# WORKERS_REPO：Worker 二进制所在的 GitHub 仓库（owner/repo 格式）
+# - 默认值为本 fork 仓库 landuo/MoviePilot，与 build-workers.yml 发布产物所在仓库一致
+# - 上游 jxxghp/MoviePilot-Workers 仓库实际不存在；如未来上游创建独立 worker 仓库，
+#   或其他 fork 自行发布时，可通过 docker build --build-arg WORKERS_REPO=<owner/repo> 覆盖
+# - CI 场景下 build.yml / beta.yml 已注入 ${{ github.repository }} 实现自适配
+ARG WORKERS_REPO=landuo/MoviePilot
 RUN mkdir -p /app/bin \
     && WORKERS_VERSION=$(sed -n "s/^WORKERS_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/version.py) \
     && for name in mp-watcher mp-transfer mp-indexer; do \
@@ -114,7 +121,7 @@ RUN mkdir -p /app/bin \
                 *)       WORKER_PLATFORM="" ;; \
             esac; \
             if [ -n "${WORKER_PLATFORM}" ]; then \
-                url="https://github.com/jxxghp/MoviePilot-Workers/releases/download/${WORKERS_VERSION}/${name}-${WORKER_PLATFORM}"; \
+                url="https://github.com/${WORKERS_REPO}/releases/download/${WORKERS_VERSION}/${name}-${WORKER_PLATFORM}"; \
                 echo "Downloading worker: ${url}"; \
                 if curl -fsSL "${url}" -o "/app/bin/${name}"; then \
                     chmod +x "/app/bin/${name}"; \
