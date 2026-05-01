@@ -505,6 +505,64 @@ class IndexerModule(_ModuleBase):
 
         return results
 
+    async def async_worker_search_site(self, site: dict,
+                                       keyword: Optional[str] = None,
+                                       mtype: MediaType = None,
+                                       cat: Optional[str] = None,
+                                       page: Optional[int] = 0) -> List[TorrentInfo]:
+        """
+        单站点真异步搜索入口（流式批量化使用）
+
+        与 async_search_torrents 的区别：
+        - async_search_torrents：内部 worker 调用是同步阻塞的（HTTP over UDS），
+          多站点并发时本质上是 ThreadPoolExecutor 串行调度
+        - async_worker_search_site：worker 调用与 HTML 解析都通过 run_in_threadpool
+          卸到线程池，但作为独立 coroutine 暴露，配合 asyncio.create_task +
+          asyncio.as_completed 即可获得真异步并发 + 流式语义
+
+        策略：
+        - 特殊 spider（TNode/mTorrent 等）→ 直接走原 async_search_torrents
+        - worker 不可用 → 直接走原 async_search_torrents
+        - worker 可用且通用 SiteSpider → fetch + parse 卸到线程池
+        - 任意失败 → fallback 到 async_search_torrents
+
+        :return: 资源列表（始终返回列表，不抛异常）
+        """
+        if not site:
+            return []
+
+        # 特殊 spider 走原异步路径
+        if site.get("parser") in self._SPECIAL_PARSERS:
+            return await self.async_search_torrents(
+                site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+            ) or []
+
+        # worker 不可用走原异步路径
+        if not self.__is_indexer_worker_available():
+            return await self.async_search_torrents(
+                site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+            ) or []
+
+        # worker 路径：单站点 fetch + parse 卸到线程池
+        try:
+            html_map = await run_in_threadpool(
+                self.__batch_fetch_html,
+                sites=[site], keyword=keyword, mtype=mtype, cat=cat, page=page,
+            )
+            html = html_map.get(site.get("id")) if html_map else None
+            if html:
+                return await run_in_threadpool(
+                    self.__parse_html_to_torrents,
+                    site=site, html=html, keyword=keyword, mtype=mtype, cat=cat, page=page,
+                ) or []
+        except Exception as err:
+            logger.warn(f"{site.get('name')} worker 异步搜索异常，回退原路径：{err}")
+
+        # worker 失败 fallback
+        return await self.async_search_torrents(
+            site=site, keyword=keyword, mtype=mtype, cat=cat, page=page,
+        ) or []
+
     @staticmethod
     def __is_indexer_worker_available() -> bool:
         """快速判断 mp-indexer worker 是否可用（不发请求）"""
