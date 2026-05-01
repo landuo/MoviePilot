@@ -1233,21 +1233,62 @@ class SearchChain(ChainBase):
             "total": total_num
         }
 
-        async def search_site(site: dict) -> Tuple[dict, List[TorrentInfo]]:
-            if area == "imdbid":
-                result = await self.async_search_torrents(site=site,
-                                                          keyword=mediainfo.imdb_id if mediainfo else None,
-                                                          mtype=mediainfo.type if mediainfo else None,
-                                                          page=page)
-            else:
-                result = await self.async_search_torrents(site=site,
-                                                          keyword=keyword,
-                                                          mtype=mediainfo.type if mediainfo else None,
-                                                          page=page)
+        # 实际搜索关键词（imdbid 模式下使用 imdb_id）
+        actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
+        actual_mtype = mediainfo.type if mediainfo else None
+
+        # 是否走流式批量化（worker 真异步并发）路径
+        # 通过 hasattr 检测 async_worker_search_site 是否存在，兼容非 IndexerModule 实现
+        use_stream_batch = hasattr(self, "async_worker_search_site")
+        worker_path_count = 0
+        fallback_path_count = 0
+
+        async def search_site_via_worker(site: dict) -> Tuple[dict, List[TorrentInfo]]:
+            """流式批量化路径：单站点通过 async_worker_search_site 真异步执行"""
+            try:
+                result = await self.async_worker_search_site(
+                    site=site,
+                    keyword=actual_keyword,
+                    mtype=actual_mtype,
+                    page=page,
+                )
+                return site, result or []
+            except Exception as err:  # noqa: BLE001
+                logger.warn(f"[stream-batch] 站点 {site.get('name')} 异常，回退原路径：{err}")
+                result = await self.async_search_torrents(
+                    site=site,
+                    keyword=actual_keyword,
+                    mtype=actual_mtype,
+                    page=page,
+                )
+                return site, result or []
+
+        async def search_site_legacy(site: dict) -> Tuple[dict, List[TorrentInfo]]:
+            """Legacy 路径：保留原 async_search_torrents 行为"""
+            result = await self.async_search_torrents(
+                site=site,
+                keyword=actual_keyword,
+                mtype=actual_mtype,
+                page=page,
+            )
             return site, result or []
 
-        tasks = [asyncio.create_task(search_site(site)) for site in indexer_sites]
+        if use_stream_batch:
+            logger.info(
+                f"[stream-batch] 启用流式批量化：{total_num} 个站点 / "
+                f"关键词={actual_keyword!r} / 类型={actual_mtype}"
+            )
+            worker_path_count = total_num
+            tasks = [asyncio.create_task(search_site_via_worker(site)) for site in indexer_sites]
+        else:
+            logger.info(
+                f"[stream-batch] 未启用（self 非 IndexerModule），使用 legacy 路径：{total_num} 个站点"
+            )
+            fallback_path_count = total_num
+            tasks = [asyncio.create_task(search_site_legacy(site)) for site in indexer_sites]
+
         results_count = 0
+        first_byte_logged = False
         try:
             for future in asyncio.as_completed(tasks):
                 if global_vars.is_system_stopped:
@@ -1255,6 +1296,13 @@ class SearchChain(ChainBase):
                 finish_count += 1
                 site, result = await future
                 results_count += len(result)
+                if not first_byte_logged:
+                    first_byte_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                    logger.info(
+                        f"[stream-batch] 首站点完成 {site.get('name')} | "
+                        f"耗时 {first_byte_ms}ms | 资源数 {len(result)}"
+                    )
+                    first_byte_logged = True
                 logger.info(f"站点搜索进度：{finish_count} / {total_num}")
                 progress_value = finish_count / total_num * 100
                 progress_text = f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个站点 ..."
@@ -1277,9 +1325,15 @@ class SearchChain(ChainBase):
                     task.cancel()
 
         end_time = datetime.now()
+        elapsed = (end_time - start_time).seconds
         progress.update(value=100,
-                        text=f"站点搜索完成，有效资源数：{results_count}，总耗时 {(end_time - start_time).seconds} 秒")
-        logger.info(f"站点搜索完成，有效资源数：{results_count}，总耗时 {(end_time - start_time).seconds} 秒")
+                        text=f"站点搜索完成，有效资源数：{results_count}，总耗时 {elapsed} 秒")
+        logger.info(f"站点搜索完成，有效资源数：{results_count}，总耗时 {elapsed} 秒")
+        logger.info(
+            f"[stream-batch] 完成统计：worker 路径={worker_path_count} | "
+            f"legacy 路径={fallback_path_count} | 总站点={total_num} | "
+            f"总耗时={elapsed}s | 资源数={results_count}"
+        )
         progress.end()
 
     @eventmanager.register(EventType.SiteDeleted)
