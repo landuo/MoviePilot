@@ -171,25 +171,20 @@ jobs:
         id: get_release_body
         continue-on-error: true
         run: |
-          # 将 changelog 与已有 release body 都写到文件，避免通过 ${{ env.XXX }} 表达式
-          # 插值时超出 ARG_MAX（128KB）导致 "Argument list too long" 错误
           release_body=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/v${{ env.app_version }}" | \
             jq -r '.body // ""')
 
-          mkdir -p "${RUNNER_TEMP}/release"
-          body_file="${RUNNER_TEMP}/release/body.md"
-
-          if [ -n "$release_body" ] && [ "$release_body" != "null" ]; then
-            # 已有手动编写的 release body，优先保留
-            printf '%s' "$release_body" > "$body_file"
+          # 如果已有手动编写的 release body，则保留；否则使用自动生成的 changelog
+          if [ -n "$release_body" ] && [ "$release_body" != "null" ] && [ "$release_body" != "" ]; then
+            echo "RELEASE_BODY<<EOF" >> $GITHUB_ENV
+            echo "$release_body" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
           else
-            # 否则使用自动生成的 changelog
-            printf '%s' "${{ env.CHANGELOG }}" > "$body_file"
+            echo "RELEASE_BODY<<EOF" >> $GITHUB_ENV
+            echo "${{ env.CHANGELOG }}" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
           fi
-
-          echo "body_file=${body_file}" >> $GITHUB_OUTPUT
-          echo "Release body written to ${body_file} ($(wc -c < "$body_file") bytes)"
 
       - name: Delete Release
         uses: dev-drprasad/delete-tag-and-release@v1.1
