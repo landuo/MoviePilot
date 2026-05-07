@@ -5,7 +5,7 @@
 ## 一键安装
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/scripts/bootstrap-local.sh | bash
+curl -fsSL https://raw.githubusercontent.com/landuo/MoviePilot/v2/scripts/bootstrap-local.sh | bash
 ```
 
 脚本会自动：
@@ -245,7 +245,7 @@ moviepilot setup --config-dir /path/to/moviepilot-config
 如果希望在自动化安装时直接预设超级管理员，也可以在一键安装脚本中透传：
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/scripts/bootstrap-local.sh | \
+curl -fsSL https://raw.githubusercontent.com/landuo/MoviePilot/v2/scripts/bootstrap-local.sh | \
   bash -s -- --superuser admin --superuser-password 'ChangeMe123!'
 ```
 

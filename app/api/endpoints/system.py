@@ -85,8 +85,8 @@ def _build_nettest_rules() -> list[dict[str, Any]]:
     tmdb_key = settings.TMDB_API_KEY
     tmdb_domain = settings.TMDB_API_DOMAIN or "api.themoviedb.org"
 
-    github_readme_url = "https://github.com/jxxghp/MoviePilot/blob/v2/README.md"
-    raw_readme_url = "https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/README.md"
+    github_readme_url = "https://github.com/landuo/MoviePilot/blob/v2/README.md"
+    raw_readme_url = "https://raw.githubusercontent.com/landuo/MoviePilot/v2/README.md"
 
     rules = [
         {

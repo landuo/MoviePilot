@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jxxghp/MoviePilot/workers/mp-transfer/internal/ops"
+	"github.com/landuo/MoviePilot/workers/mp-transfer/internal/ops"
 )
 
 // newTestHandler 构造一个静默 logger 的 handler 单例供测试复用。

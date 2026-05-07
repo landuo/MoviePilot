@@ -17,12 +17,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/jxxghp/MoviePilot/workers/mp-watcher/internal/handler"
-	"github.com/jxxghp/MoviePilot/workers/mp-watcher/internal/watcher"
-	"github.com/jxxghp/MoviePilot/workers/shared/config"
-	"github.com/jxxghp/MoviePilot/workers/shared/lifecycle"
-	"github.com/jxxghp/MoviePilot/workers/shared/log"
-	"github.com/jxxghp/MoviePilot/workers/shared/transport"
+	"github.com/landuo/MoviePilot/workers/mp-watcher/internal/handler"
+	"github.com/landuo/MoviePilot/workers/mp-watcher/internal/watcher"
+	"github.com/landuo/MoviePilot/workers/shared/config"
+	"github.com/landuo/MoviePilot/workers/shared/lifecycle"
+	"github.com/landuo/MoviePilot/workers/shared/log"
+	"github.com/landuo/MoviePilot/workers/shared/transport"
 )
 
 const (

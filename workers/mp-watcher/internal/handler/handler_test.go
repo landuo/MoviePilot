@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jxxghp/MoviePilot/workers/mp-watcher/internal/watcher"
+	"github.com/landuo/MoviePilot/workers/mp-watcher/internal/watcher"
 )
 
 // 用 manager + fakeSink 起一个真实的 Handler，避免 mock 整套接口

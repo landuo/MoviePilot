@@ -1,3 +1,3 @@
-module github.com/jxxghp/MoviePilot/workers/shared
+module github.com/landuo/MoviePilot/workers/shared
 
 go 1.22

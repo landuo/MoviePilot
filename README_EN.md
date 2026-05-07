@@ -88,7 +88,7 @@ For detailed worker architecture and development docs see [`workers/README.md`](
 One-command bootstrap script:
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/scripts/bootstrap-local.sh | bash
+curl -fsSL https://raw.githubusercontent.com/landuo/MoviePilot/v2/scripts/bootstrap-local.sh | bash
 ```
 
 Manage MoviePilot with the `moviepilot` command. Full CLI documentation: [`docs/cli.md`](docs/cli.md)
@@ -125,6 +125,6 @@ Plugin development guide: <https://wiki.movie-pilot.org/zh/plugindev>
 
 ## Contributors
 
-<a href="https://github.com/jxxghp/MoviePilot/graphs/contributors">
+<a href="https://github.com/landuo/MoviePilot/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=jxxghp/MoviePilot" />
 </a>

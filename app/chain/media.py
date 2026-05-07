@@ -1262,10 +1262,10 @@ class MediaChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         if filepath.name in settings.RENAME_FORMAT_S0_NAMES:
             season_meta.begin_season = 0
         elif season_meta.name and season_meta.begin_season is not None:
-            # 排除辅助词重新识别，避免误判根目录 (issue https://github.com/jxxghp/MoviePilot/issues/5501)
+            # 排除辅助词重新识别，避免误判根目录 (issue https://github.com/landuo/MoviePilot/issues/5501)
             season_meta_no_custom = MetaInfo(filepath.name, custom_words=["#"])
             if season_meta_no_custom.begin_season is None:
-                # 季号由辅助词指定，按剧集根目录处理 (issue https://github.com/jxxghp/MoviePilot/issues/5373)
+                # 季号由辅助词指定，按剧集根目录处理 (issue https://github.com/landuo/MoviePilot/issues/5373)
                 season_meta.begin_season = None
 
         # 根据季号判断目录类型并刮削

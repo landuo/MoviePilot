@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/jxxghp/MoviePilot/workers/mp-watcher/internal/watcher"
-	"github.com/jxxghp/MoviePilot/workers/shared/transport"
+	"github.com/landuo/MoviePilot/workers/mp-watcher/internal/watcher"
+	"github.com/landuo/MoviePilot/workers/shared/transport"
 )
 
 // Handler 把 watcher.Manager 暴露成 HTTP 接口。

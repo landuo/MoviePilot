@@ -8,8 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/jxxghp/MoviePilot/workers/mp-transfer/internal/ops"
-	"github.com/jxxghp/MoviePilot/workers/shared/transport"
+	"github.com/landuo/MoviePilot/workers/mp-transfer/internal/ops"
+	"github.com/landuo/MoviePilot/workers/shared/transport"
 )
 
 // Handler 把 ops.Run 暴露成 HTTP 接口，并维护轻量计数器供巡检。

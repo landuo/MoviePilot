@@ -90,7 +90,7 @@ WORKER_MODE='python'
 一键安装运行脚本：
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/scripts/bootstrap-local.sh | bash
+curl -fsSL https://raw.githubusercontent.com/landuo/MoviePilot/v2/scripts/bootstrap-local.sh | bash
 ```
 
 使用 `moviepilot` 命令管理MoviePilot，完整 CLI 文档：[`docs/cli.md`](docs/cli.md)
@@ -127,6 +127,6 @@ MCP工具API文档：详见 [docs/mcp-api.md](docs/mcp-api.md)
 
 ## 贡献者
 
-<a href="https://github.com/jxxghp/MoviePilot/graphs/contributors">
+<a href="https://github.com/landuo/MoviePilot/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=jxxghp/MoviePilot" />
 </a>
