@@ -24,7 +24,13 @@ from app.helper.torrent import TorrentHelper
 from app.log import logger
 from app.schemas import NotExistMediaInfo
 from app.schemas.types import MediaType, ProgressKey, SystemConfigKey, EventType
+from app.utils.limit import MinIntervalLimiter
 from app.utils.string import StringUtils
+
+# 多关键字搜索之间的最小间隔限流器，用于平滑请求节奏避免站点风控
+# 取代旧版 time.sleep(random.randint(1, 10))，更可控且不阻塞事件循环
+# 间隔时长由 settings.SEARCH_KEYWORD_MIN_INTERVAL 控制（默认 2 秒）
+_keyword_search_limiter = MinIntervalLimiter(min_interval=settings.SEARCH_KEYWORD_MIN_INTERVAL)
 
 
 class SearchChain(ChainBase):
@@ -819,10 +825,11 @@ class SearchChain(ChainBase):
 
         # 多关键字执行搜索
         for search_word in keywords:
-            # 强制休眠 1-10 秒
+            # 关键字之间限流，保证最小间隔，避免站点风控
             if search_count > 0:
-                logger.info(f"已搜索 {search_count} 次，强制休眠 1-10 秒 ...")
-                time.sleep(random.randint(1, 10))
+                waited = _keyword_search_limiter.acquire()
+                if waited > 0:
+                    logger.debug(f"关键字搜索限流：等待 {waited:.2f} 秒")
 
             # 搜索站点
             results = self.__search_all_sites(
@@ -902,10 +909,11 @@ class SearchChain(ChainBase):
 
         # 多关键字执行搜索
         for search_word in keywords:
-            # 强制休眠 1-10 秒
+            # 关键字之间限流（异步等待，不阻塞事件循环）
             if search_count > 0:
-                logger.info(f"已搜索 {search_count} 次，强制休眠 1-10 秒 ...")
-                await asyncio.sleep(random.randint(1, 10))
+                waited = await _keyword_search_limiter.async_acquire()
+                if waited > 0:
+                    logger.debug(f"关键字搜索限流：等待 {waited:.2f} 秒")
             # 搜索站点
             torrents.extend(
                 await self.__async_search_all_sites(
@@ -977,9 +985,11 @@ class SearchChain(ChainBase):
         search_count = 0
 
         for search_word in keywords:
+            # 关键字之间限流（异步等待，不阻塞事件循环）
             if search_count > 0:
-                logger.info(f"已搜索 {search_count} 次，强制休眠 1-10 秒 ...")
-                await asyncio.sleep(random.randint(1, 10))
+                waited = await _keyword_search_limiter.async_acquire()
+                if waited > 0:
+                    logger.debug(f"关键字搜索限流：等待 {waited:.2f} 秒")
 
             async for event in self.__async_search_all_sites_stream(
                     mediainfo=mediainfo,

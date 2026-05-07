@@ -51,6 +51,9 @@ if __name__ == '__main__':
     suite.addTests(loader.loadTestsFromName("tests.test_system_utils_worker"))
     suite.addTests(loader.loadTestsFromName("tests.test_indexer_worker"))
 
+    # 测试搜索/订阅链路的最小间隔限流器
+    suite.addTests(loader.loadTestsFromName("tests.test_min_interval_limiter"))
+
     # 运行测试
     runner = unittest.TextTestRunner()
     runner.run(suite)

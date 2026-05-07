@@ -217,7 +217,7 @@ class SystemChain(ChainBase):
             response = RequestUtils(
                 proxies=settings.PROXY,
                 headers=settings.GITHUB_HEADERS
-            ).get_res("https://api.github.com/repos/jxxghp/MoviePilot/releases")
+            ).get_res("https://api.github.com/repos/landuo/MoviePilot/releases")
             if response:
                 releases = [release['tag_name'] for release in response.json()]
                 v2_releases = [tag for tag in releases if re.match(r"^v2\.", tag)]

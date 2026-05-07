@@ -535,11 +535,11 @@ class SubscribeChain(ChainBase):
                         if (now - subscribe_time).total_seconds() < 60:
                             logger.debug(f"订阅标题：{subscribe.name} 新增小于1分钟，暂不搜索...")
                             continue
-                    # 随机休眠1-5分钟
-                    if not sid and state in ['R', 'P']:
-                        sleep_time = random.randint(60, 300)
-                        logger.info(f'订阅搜索随机休眠 {sleep_time} 秒 ...')
-                        time.sleep(sleep_time)
+                    # 注：旧版本此处会随机 sleep 60-300 秒以平滑请求节奏，但这会导致：
+                    # 1) 调度器线程长时间阻塞，其他定时任务被推迟
+                    # 2) 在 async 调用链中调用时会冻结事件循环
+                    # 现已改为在 SearchChain 内部按关键字粒度做最小间隔限流（_keyword_search_limiter），
+                    # 既能避免站点风控，又不会全局阻塞。
                     try:
                         logger.info(f'开始搜索订阅，标题：{subscribe.name} ...')
                         # 生成元数据

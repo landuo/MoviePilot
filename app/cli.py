@@ -30,7 +30,7 @@ FRONTEND_VERSION_FILE = FRONTEND_DIR / "version.txt"
 HEALTH_PATH = "/api/v1/system/global"
 HEALTH_TOKEN = "moviepilot"
 FRONTEND_HEALTH_PATH = "/version.txt"
-BACKEND_RELEASES_API = "https://api.github.com/repos/jxxghp/MoviePilot/releases"
+BACKEND_RELEASES_API = "https://api.github.com/repos/landuo/MoviePilot/releases"
 FRONTEND_RELEASES_API = "https://api.github.com/repos/jxxghp/MoviePilot-Frontend/releases"
 LOCAL_HOSTS = {"0.0.0.0", "::", "::1", "", "localhost"}
 MANAGED_ACTIVE_STATES = {"running", "starting"}
@@ -292,7 +292,7 @@ def _resolve_auto_update_targets(mode: str) -> tuple[Optional[str], Optional[str
     else:
         backend_ref = _latest_release_tag(
             BACKEND_RELEASES_API,
-            repo="jxxghp/MoviePilot",
+            repo="landuo/MoviePilot",
             prefix=backend_prefix,
         )
 

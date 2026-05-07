@@ -329,6 +329,10 @@ class ConfigModel(BaseModel):
     SEARCH_MULTIPLE_NAME: bool = False
     # 最大搜索名称数量
     MAX_SEARCH_NAME_LIMIT: int = 3
+    # 多关键字搜索之间的最小间隔（秒），用于平滑请求节奏避免站点风控
+    # 取代旧版 1-10 秒随机 sleep。设为 0 表示不限流
+    # 默认 2 秒：兼顾用户体验（多关键字总耗时低）和站点风控（足以避免高频）
+    SEARCH_KEYWORD_MIN_INTERVAL: float = 2.0
 
     # ==================== 下载配置 ====================
     # 种子标签

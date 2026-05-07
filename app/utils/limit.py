@@ -443,6 +443,96 @@ class QpsRateLimiter:
         if sleep_duration > 0:
             time.sleep(sleep_duration)
 
+class MinIntervalLimiter:
+    """
+    最小间隔限流器：保证两次调用之间至少间隔 min_interval 秒
+    与 QpsRateLimiter 的区别：
+    - 计算等待时长但不内部 sleep，由调用方决定用同步 (time.sleep) 还是异步 (asyncio.sleep) 等待
+    - 适用于希望同时保留同步/异步两种调用风格的场景，避免在 async 上下文中误用 time.sleep 阻塞事件循环
+    """
+
+    def __init__(self, min_interval: float = 1.0):
+        """
+        :param min_interval: 两次调用之间的最小间隔（秒），<= 0 表示不限流
+        """
+        self._min_interval = max(0.0, float(min_interval))
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def reserve(self) -> float:
+        """
+        预约一次调用，返回需要等待的秒数（>= 0）
+        线程安全：调用后会立即推进 next_allowed 时间，避免并发时多个调用者同时通过
+        """
+        if self._min_interval <= 0:
+            return 0.0
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_allowed - now)
+            self._next_allowed = max(now, self._next_allowed) + self._min_interval
+            return wait
+
+    def acquire(self) -> float:
+        """
+        同步获取调用许可，阻塞直到满足最小间隔
+        :return: 实际等待的秒数
+        """
+        wait = self.reserve()
+        if wait > 0:
+            time.sleep(wait)
+        return wait
+
+    async def async_acquire(self) -> float:
+        """
+        异步获取调用许可，使用 asyncio.sleep 不阻塞事件循环
+        :return: 实际等待的秒数
+        """
+        import asyncio
+        wait = self.reserve()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        return wait
+
+    def reset(self) -> None:
+        """
+        重置限流状态
+        """
+        with self._lock:
+            self._next_allowed = 0.0
+
+class KeyedMinIntervalLimiter:
+    """
+    按 key 分桶的最小间隔限流器
+    用于多对象（如多站点、多关键字）独立限流，互不干扰
+    """
+
+    def __init__(self, min_interval: float = 1.0):
+        self._min_interval = min_interval
+        self._lock = threading.Lock()
+        self._limiters: dict = {}
+
+    def _get(self, key: Any) -> MinIntervalLimiter:
+        with self._lock:
+            limiter = self._limiters.get(key)
+            if limiter is None:
+                limiter = MinIntervalLimiter(self._min_interval)
+                self._limiters[key] = limiter
+            return limiter
+
+    def acquire(self, key: Any) -> float:
+        return self._get(key).acquire()
+
+    async def async_acquire(self, key: Any) -> float:
+        return await self._get(key).async_acquire()
+
+    def reset(self, key: Optional[Any] = None) -> None:
+        if key is None:
+            with self._lock:
+                for limiter in self._limiters.values():
+                    limiter.reset()
+        else:
+            self._get(key).reset()
+
 
 class RateStats:
     """
