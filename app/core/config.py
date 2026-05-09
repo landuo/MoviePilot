@@ -382,10 +382,14 @@ class ConfigModel(BaseModel):
     SCRAP_FOLLOW_TMDB: bool = True
     # 优先使用辅助识别
     RECOGNIZE_PLUGIN_FIRST: bool = False
+    # 共享使用媒体识别数据
+    MEDIA_RECOGNIZE_SHARE: bool = True
 
     # ==================== 服务地址配置 ====================
     # 服务器地址，对应 https://github.com/jxxghp/MoviePilot-Server 项目
     MP_SERVER_HOST: str = "https://movie-pilot.org"
+    # 共享媒体识别API地址，留空时默认拼接为 MP_SERVER_HOST + /recognize/share
+    MEDIA_RECOGNIZE_SHARE_API: Optional[str] = None
 
     # ==================== 个性化 ====================
     # 登录页面电影海报,tmdb/bing/mediaserver
@@ -553,7 +557,7 @@ class ConfigModel(BaseModel):
     AI_AGENT_ENABLE: bool = False
     # 合局AI智能体
     AI_AGENT_GLOBAL: bool = False
-    # LLM提供商 (openai/google/deepseek)
+    # LLM提供商（支持内置 provider，以及从 models.dev 动态补充的平台）
     LLM_PROVIDER: str = "deepseek"
     # LLM模型名称
     LLM_MODEL: str = "deepseek-chat"
@@ -567,6 +571,8 @@ class ConfigModel(BaseModel):
     LLM_API_KEY: Optional[str] = None
     # LLM基础URL（用于自定义API端点）
     LLM_BASE_URL: Optional[str] = "https://api.deepseek.com"
+    # LLM Base URL 预设标识，用于区分同一 Base URL 下的不同模型目录
+    LLM_BASE_URL_PRESET: Optional[str] = None
     # LLM最大上下文Token数量（K）
     LLM_MAX_CONTEXT_TOKENS: int = 64
     # LLM温度参数
