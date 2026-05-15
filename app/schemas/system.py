@@ -29,7 +29,7 @@ class MediaServerConf(BaseModel):
 
     # 名称
     name: Optional[str] = None
-    # 类型 emby/jellyfin/plex/trimemedia/ugreen
+    # 类型 emby/zspace/jellyfin/plex/trimemedia/ugreen
     type: Optional[str] = None
     # 配置
     config: Optional[dict] = Field(default_factory=dict)
@@ -65,7 +65,7 @@ class NotificationConf(BaseModel):
 
     # 名称
     name: Optional[str] = None
-    # 类型 telegram/wechat/vocechat/synologychat/slack/webpush/qqbot
+    # 类型 telegram/wechat/feishu/vocechat/synologychat/slack/webpush/qqbot
     type: Optional[str] = None
     # 配置
     config: Optional[dict] = Field(default_factory=dict)

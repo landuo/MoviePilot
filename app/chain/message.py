@@ -5,13 +5,14 @@ import mimetypes
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional, Dict, Union, List, Tuple
 from urllib.parse import unquote, urlparse
 
 from app.agent import ReplyMode, agent_manager, prompt_manager
-from app.agent.llm import LLMHelper
+from app.agent.llm import AgentCapabilityManager, LLMHelper
 from app.chain import ChainBase
 from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
@@ -28,10 +29,9 @@ from app.db.transferhistory_oper import TransferHistoryOper
 from app.db.user_oper import UserOper
 from app.helper.interaction import agent_interaction_manager, media_interaction_manager, PendingMediaInteraction
 from app.helper.torrent import TorrentHelper
-from app.helper.voice import VoiceHelper
 from app.log import logger
 from app.schemas import Notification, CommingMessage, NotExistMediaInfo
-from app.schemas.message import ChannelCapabilityManager
+from app.schemas.message import ChannelCapabilityManager, ChannelCapability
 from app.schemas.types import EventType, MessageChannel, MediaType
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
@@ -46,6 +46,26 @@ class MessageChain(ChainBase):
     _user_sessions: Dict[Union[str, int], tuple] = {}
     # 会话超时时间（分钟）
     _session_timeout_minutes: int = 24 * 60
+
+    @dataclass
+    class _ProcessingStatus:
+        channel: MessageChannel
+        source: str
+        userid: Optional[Union[str, int]] = None
+        message_id: Optional[Union[str, int]] = None
+        chat_id: Optional[Union[str, int]] = None
+        metadata: Optional[Dict[str, Any]] = None
+
+        def to_dict(self) -> Dict[str, Any]:
+            """转换为模块接口可安全传递的普通字典。"""
+            return {
+                "channel": self.channel.value,
+                "source": self.source,
+                "userid": self.userid,
+                "message_id": self.message_id,
+                "chat_id": self.chat_id,
+                "metadata": self.metadata or {},
+            }
 
     def process(self, body: Any, form: Any, args: Any) -> None:
         """
@@ -151,6 +171,58 @@ class MessageChain(ChainBase):
                 text=text,
             )
 
+        processing_status = self._mark_message_processing_started(
+            channel=channel,
+            source=source,
+            userid=userid,
+            original_message_id=original_message_id,
+            original_chat_id=original_chat_id,
+            text=text,
+        )
+        continues_async = False
+        try:
+            continues_async = self._handle_message_core(
+                channel=channel,
+                source=source,
+                userid=userid,
+                username=username,
+                text=text,
+                original_message_id=original_message_id,
+                original_chat_id=original_chat_id,
+                images=images,
+                audio_refs=audio_refs,
+                files=files,
+                has_audio_input=has_audio_input,
+                processing_status=processing_status,
+            )
+        finally:
+            if continues_async is not True:
+                self._mark_message_processing_finished(
+                    channel=channel,
+                    source=source,
+                    userid=userid,
+                    status=processing_status,
+                    original_message_id=original_message_id,
+                    original_chat_id=original_chat_id,
+                )
+
+    def _handle_message_core(
+            self,
+            channel: MessageChannel,
+            source: str,
+            userid: Union[str, int],
+            username: str,
+            text: str,
+            original_message_id: Optional[Union[str, int]] = None,
+            original_chat_id: Optional[str] = None,
+            images: Optional[List[CommingMessage.MessageImage]] = None,
+            audio_refs: Optional[List[str]] = None,
+            files: Optional[List[CommingMessage.MessageAttachment]] = None,
+            has_audio_input: bool = False,
+            processing_status: Optional[_ProcessingStatus] = None,
+    ) -> bool:
+        """执行实际消息路由，便于统一包裹处理中状态。"""
+
         if text.startswith("CALLBACK:"):
             if ChannelCapabilityManager.supports_callbacks(channel):
                 self._handle_callback(
@@ -168,14 +240,14 @@ class MessageChain(ChainBase):
                     channel.value,
                     text,
                 )
-            return
+            return False
 
         if text.startswith("/") and not text.lower().startswith("/ai"):
             self.eventmanager.send_event(
                 EventType.CommandExcute,
                 {"cmd": text, "user": userid, "channel": channel, "source": source},
             )
-            return
+            return False
 
         latest_slash_interaction = self._get_latest_slash_interaction(userid)
         if latest_slash_interaction == "sites":
@@ -186,7 +258,7 @@ class MessageChain(ChainBase):
                     username=username,
                     text=text,
             ):
-                return
+                return False
 
         if latest_slash_interaction == "subscribes":
             if SubscribeChain().handle_text_interaction(
@@ -196,7 +268,7 @@ class MessageChain(ChainBase):
                     username=username,
                     text=text,
             ):
-                return
+                return False
 
         if latest_slash_interaction == "skills":
             if SkillsChain().handle_text_interaction(
@@ -206,7 +278,7 @@ class MessageChain(ChainBase):
                     username=username,
                     text=text,
             ):
-                return
+                return False
 
         if media_interaction_manager.get_by_user(userid):
             if MediaInteractionChain().handle_text_interaction(
@@ -216,34 +288,38 @@ class MessageChain(ChainBase):
                     username=username,
                     text=text,
             ):
-                return
+                return False
 
         if text.lower().startswith("/ai"):
-            self._handle_ai_message(
+            return self._handle_ai_message(
                 text=text,
                 channel=channel,
                 source=source,
                 userid=userid,
                 username=username,
+                original_message_id=original_message_id,
+                original_chat_id=original_chat_id,
                 images=images,
                 files=files,
+                processing_status=processing_status,
             )
-            return
 
         if (
                 settings.AI_AGENT_ENABLE
                 and (settings.AI_AGENT_GLOBAL or images or files or has_audio_input)
         ):
-            self._handle_ai_message(
+            return self._handle_ai_message(
                 text=text,
                 channel=channel,
                 source=source,
                 userid=userid,
                 username=username,
+                original_message_id=original_message_id,
+                original_chat_id=original_chat_id,
                 images=images,
                 files=files,
+                processing_status=processing_status,
             )
-            return
 
         if MediaInteractionChain().handle_text_interaction(
                 channel=channel,
@@ -252,7 +328,7 @@ class MessageChain(ChainBase):
                 username=username,
                 text=text,
         ):
-            return
+            return False
 
         self.eventmanager.send_event(
             EventType.UserMessage,
@@ -263,6 +339,80 @@ class MessageChain(ChainBase):
                 "source": source,
             },
         )
+        return False
+
+    def _mark_message_processing_started(
+            self,
+            channel: MessageChannel,
+            source: str,
+            userid: Union[str, int],
+            original_message_id: Optional[Union[str, int]],
+            original_chat_id: Optional[Union[str, int]],
+            text: str,
+    ) -> Optional[_ProcessingStatus]:
+        """为支持的渠道标记“消息正在处理”。"""
+        if not ChannelCapabilityManager.supports_capability(
+                channel, ChannelCapability.PROCESSING_STATUS
+        ):
+            return None
+        if not text:
+            return None
+
+        try:
+            status = self.run_module(
+                "mark_message_processing_started",
+                channel=channel,
+                source=source,
+                userid=userid,
+                message_id=original_message_id,
+                chat_id=original_chat_id,
+                text=text,
+            )
+        except Exception as err:
+            logger.debug(f"标记消息处理状态失败: {err}")
+            return None
+
+        if not isinstance(status, dict):
+            return None
+        metadata = status.get("metadata")
+        return self._ProcessingStatus(
+            channel=channel,
+            source=source,
+            userid=status.get("userid", userid),
+            message_id=status.get("message_id", original_message_id),
+            chat_id=status.get("chat_id", original_chat_id),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+
+    def _mark_message_processing_finished(
+            self,
+            channel: MessageChannel,
+            source: str,
+            userid: Union[str, int],
+            status: Optional[_ProcessingStatus] = None,
+            original_message_id: Optional[Union[str, int]] = None,
+            original_chat_id: Optional[Union[str, int]] = None,
+    ) -> None:
+        """
+        结束渠道侧“消息正在处理”状态。
+        不同渠道的表现可能是 reaction、typing 等，消息链只负责调用通用模块接口。
+        """
+        if not status and not ChannelCapabilityManager.supports_capability(
+                channel, ChannelCapability.PROCESSING_STATUS
+        ):
+            return
+        try:
+            self.run_module(
+                "mark_message_processing_finished",
+                channel=channel,
+                source=source,
+                userid=userid,
+                message_id=status.message_id if status else original_message_id,
+                chat_id=status.chat_id if status else original_chat_id,
+                status=status.to_dict() if status else None,
+            )
+        except Exception as err:
+            logger.debug(f"结束消息处理状态失败: {err}")
 
     def _handle_callback(
             self,
@@ -982,10 +1132,13 @@ class MessageChain(ChainBase):
             source: str,
             userid: Union[str, int],
             username: str,
+            original_message_id: Optional[Union[str, int]] = None,
+            original_chat_id: Optional[str] = None,
             images: Optional[List[CommingMessage.MessageImage]] = None,
             files: Optional[List[CommingMessage.MessageAttachment]] = None,
             session_id: Optional[str] = None,
-    ) -> None:
+            processing_status: Optional[_ProcessingStatus] = None,
+    ) -> bool:
         """
         处理AI智能体消息
         """
@@ -1001,7 +1154,7 @@ class MessageChain(ChainBase):
                         title="MoviePilot智能助手未启用，请在系统设置中启用",
                     )
                 )
-                return
+                return False
 
             images = CommingMessage.MessageImage.normalize_list(images)
 
@@ -1021,7 +1174,7 @@ class MessageChain(ChainBase):
                         title="请输入您的问题或需求",
                     )
                 )
-                return
+                return False
 
             # 生成或复用会话ID
             session_id = session_id or self._get_or_create_session_id(userid)
@@ -1044,7 +1197,7 @@ class MessageChain(ChainBase):
                             title="附件读取失败，请稍后重试",
                         )
                     )
-                    return
+                    return False
             elif images:
                 image_attachments = self._build_image_attachments(images)
                 if (
@@ -1062,7 +1215,7 @@ class MessageChain(ChainBase):
                             title="附件读取失败，请稍后重试",
                         )
                     )
-                    return
+                    return False
                 all_files.extend(image_attachments)
                 images = None
 
@@ -1082,7 +1235,7 @@ class MessageChain(ChainBase):
                         title="文件读取失败，请稍后重试",
                     )
                 )
-                return
+                return False
 
             # 在事件循环中处理
             asyncio.run_coroutine_threadsafe(
@@ -1095,15 +1248,22 @@ class MessageChain(ChainBase):
                     channel=channel.value if channel else None,
                     source=source,
                     username=username,
+                    original_message_id=str(original_message_id) if original_message_id else None,
+                    original_chat_id=original_chat_id,
+                    processing_status=processing_status.to_dict()
+                    if processing_status
+                    else None,
                 ),
                 global_vars.loop,
             )
+            return True
 
         except Exception as e:
             logger.error(f"处理AI智能体消息失败: {e}")
             self.messagehelper.put(
                 f"AI智能体处理失败: {str(e)}", role="system", title="MoviePilot助手"
             )
+            return False
 
     def _transcribe_audio_refs(
             self, audio_refs: List[str], channel: MessageChannel, source: str
@@ -1113,8 +1273,8 @@ class MessageChain(ChainBase):
         """
         if not audio_refs:
             return None
-        if not VoiceHelper.is_available("stt"):
-            logger.warning("语音能力未配置，跳过语音识别")
+        if not AgentCapabilityManager.is_audio_input_available():
+            logger.warning("音频输入能力未配置或未启用，跳过语音识别")
             return None
 
         transcripts = []
@@ -1189,6 +1349,13 @@ class MessageChain(ChainBase):
                     )
                 elif audio_ref.startswith("wxbot://voice"):
                     continue
+                elif audio_ref.startswith("feishu://file/"):
+                    content = self.run_module(
+                        "download_feishu_file_bytes", file_ref=audio_ref, source=source
+                    )
+                    filename = self._guess_audio_filename(
+                        audio_ref, default="input.opus"
+                    )
                 elif audio_ref.startswith("http"):
                     resp = RequestUtils(timeout=30).get_res(audio_ref)
                     content = resp.content if resp and resp.content else None
@@ -1213,7 +1380,7 @@ class MessageChain(ChainBase):
                     )
                     continue
 
-                transcript = VoiceHelper.transcribe_bytes(
+                transcript = AgentCapabilityManager.transcribe_audio(
                     content=content, filename=filename
                 )
                 if transcript:
@@ -1256,11 +1423,11 @@ class MessageChain(ChainBase):
         """
         下载可直接提供给 LLM 的附件内容，并统一转换为 data URL。
         """
-        attachments = CommingMessage.MessageImage.normalize_list(attachments)
-        if not attachments:
+        normalized_attachments = CommingMessage.MessageImage.normalize_list(attachments) or []
+        if not normalized_attachments:
             return None
         data_urls = []
-        for attachment in attachments:
+        for attachment in normalized_attachments:
             attachment_ref = attachment.ref
             try:
                 before_count = len(data_urls)
@@ -1284,6 +1451,14 @@ class MessageChain(ChainBase):
                 ):
                     data_url = self.run_module(
                         "download_wechat_image_to_data_url",
+                        image_ref=attachment_ref,
+                        source=source,
+                    )
+                    if data_url:
+                        data_urls.append(data_url)
+                elif attachment_ref.startswith("feishu://image/"):
+                    data_url = self.run_module(
+                        "download_feishu_image_to_data_url",
                         image_ref=attachment_ref,
                         source=source,
                     )
@@ -1461,6 +1636,10 @@ class MessageChain(ChainBase):
         if file_ref.startswith("wxclaw://file/") or file_ref.startswith("wxclaw://voice/"):
             return self.run_module(
                 "download_wechat_media_bytes", media_ref=file_ref, source=source
+            )
+        if file_ref.startswith("feishu://file/"):
+            return self.run_module(
+                "download_feishu_file_bytes", file_ref=file_ref, source=source
             )
         if file_ref.startswith("slack://file/"):
             return self.run_module(

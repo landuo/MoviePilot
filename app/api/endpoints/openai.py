@@ -85,12 +85,16 @@ class _OpenAIStreamingHandler(StreamingHandler):
         source: Optional[str] = None,
         user_id: Optional[str] = None,
         username: Optional[str] = None,
+        original_message_id: Optional[str] = None,
+        original_chat_id: Optional[str] = None,
         title: str = "",
     ):
         self._channel = channel
         self._source = source
         self._user_id = user_id
         self._username = username
+        self._original_message_id = original_message_id
+        self._original_chat_id = original_chat_id
         self._title = title
         self._streaming_enabled = True
         self._sent_text = ""
@@ -247,9 +251,15 @@ def _check_auth(
     return None
 
 
-@router.get("/models", summary="OpenAI compatible models", response_model=schemas.OpenAIModelListResponse)
+@router.get(
+    "/models",
+    summary="OpenAI compatible models",
+    response_model=schemas.OpenAIModelListResponse,
+)
 async def list_models(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(openai_bearer_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(
+        openai_bearer_scheme
+    ),
 ):
     auth_error = _check_auth(credentials)
     if auth_error:
@@ -268,7 +278,9 @@ async def list_models(
 async def chat_completions(
     payload: schemas.OpenAIChatCompletionsRequest,
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(openai_bearer_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(
+        openai_bearer_scheme
+    ),
 ):
     auth_error = _check_auth(credentials)
     if auth_error:
@@ -300,7 +312,9 @@ async def chat_completions(
     )
 
     try:
-        prompt, images = build_prompt(payload.messages, use_server_session=use_server_session)
+        prompt, images = build_prompt(
+            payload.messages, use_server_session=use_server_session
+        )
     except ValueError as exc:
         return _error_response(str(exc), 400, code="invalid_messages")
 
@@ -349,10 +363,16 @@ async def chat_completions(
     return JSONResponse(content=build_completion_payload(content, MODEL_ID))
 
 
-@router.post("/responses", summary="OpenAI compatible responses", response_model=schemas.OpenAIResponsesResponse)
+@router.post(
+    "/responses",
+    summary="OpenAI compatible responses",
+    response_model=schemas.OpenAIResponsesResponse,
+)
 async def responses(
     payload: schemas.OpenAIResponsesRequest,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(openai_bearer_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(
+        openai_bearer_scheme
+    ),
 ):
     auth_error = _check_auth(credentials)
     if auth_error:
@@ -373,7 +393,9 @@ async def responses(
             code="unsupported_stream",
         )
 
-    normalized_messages = build_responses_input(payload.input, instructions=payload.instructions)
+    normalized_messages = build_responses_input(
+        payload.input, instructions=payload.instructions
+    )
     if not normalized_messages:
         return _error_response(
             "`input` must include at least one usable message.",
@@ -382,7 +404,9 @@ async def responses(
         )
 
     try:
-        prompt, images = build_prompt(normalized_messages, use_server_session=bool(payload.user))
+        prompt, images = build_prompt(
+            normalized_messages, use_server_session=bool(payload.user)
+        )
     except ValueError as exc:
         return _error_response(str(exc), 400, code="invalid_input")
 

@@ -66,8 +66,10 @@ class TransferTask(BaseModel):
     downloader: Optional[str] = None
     download_hash: Optional[str] = None
     download_history: Optional[DownloadHistory] = None
+    transfer_batch_id: Optional[str] = None
     manual: Optional[bool] = False
     background: Optional[bool] = True
+    preview: Optional[bool] = False
 
     def to_dict(self):
         """
@@ -203,3 +205,5 @@ class ManualTransferItem(BaseModel):
     from_history: Optional[bool] = False
     # 剧集组
     episode_group: Optional[str] = None
+    # 仅预览，不执行整理
+    preview: Optional[bool] = False

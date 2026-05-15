@@ -1125,6 +1125,7 @@ class ChainBase(metaclass=ABCMeta):
             episodes_info: List[TmdbEpisode] = None,
             source_oper: Callable = None,
             target_oper: Callable = None,
+            preview: bool = False,
     ) -> Optional[TransferInfo]:
         """
         文件转移
@@ -1141,6 +1142,7 @@ class ChainBase(metaclass=ABCMeta):
         :param episodes_info: 当前季的全部集信息
         :param source_oper:  源存储操作类
         :param target_oper:  目标存储操作类
+        :param preview: 是否仅预览，不执行实际转移
         :return: {path, target_path, message}
         """
         return self.run_module(
@@ -1158,6 +1160,7 @@ class ChainBase(metaclass=ABCMeta):
             episodes_info=episodes_info,
             source_oper=source_oper,
             target_oper=target_oper,
+            preview=preview,
         )
 
     def transfer_completed(self, hashs: str, downloader: Optional[str] = None) -> None:
@@ -1568,6 +1571,7 @@ class ChainBase(metaclass=ABCMeta):
             text: str,
             title: Optional[str] = None,
             buttons: Optional[List[List[dict]]] = None,
+            metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         编辑已发送的消息
@@ -1578,6 +1582,7 @@ class ChainBase(metaclass=ABCMeta):
         :param text: 新的消息内容
         :param title: 消息标题
         :param buttons: 更新后的按钮列表
+        :param metadata: 其他消息元数据
         :return: 编辑是否成功
         """
         return self.run_module(
@@ -1589,6 +1594,7 @@ class ChainBase(metaclass=ABCMeta):
             text=text,
             title=title,
             buttons=buttons,
+            metadata=metadata,
         )
 
     def send_direct_message(self, message: Notification) -> Optional[MessageResponse]:
@@ -1602,6 +1608,16 @@ class ChainBase(metaclass=ABCMeta):
             "send_direct_message",
             message=self._normalize_notification_for_dispatch(message),
         )
+
+    def finalize_message(
+            self,
+            response: MessageResponse,
+    ) -> bool:
+        """
+        对已发送消息执行渠道收尾动作。
+        例如关闭流式卡片状态；无特殊收尾的渠道直接返回 False。
+        """
+        return self.run_module("finalize_message", response=response)
 
     def metadata_img(
             self,

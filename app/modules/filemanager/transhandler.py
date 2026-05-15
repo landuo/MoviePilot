@@ -63,6 +63,26 @@ class TransHandler:
                     current_value = value
                 setattr(result, key, current_value)
 
+    @staticmethod
+    def __build_preview_item(
+            storage: str,
+            path: Path,
+            item_type: str,
+            size: Optional[int] = None,
+    ) -> FileItem:
+        """
+        构造预览结果中的文件项，不访问真实存储。
+        """
+        return FileItem(
+            storage=storage,
+            path=path.as_posix(),
+            name=path.name,
+            basename=path.stem,
+            type=item_type,
+            extension=path.suffix.lstrip(".") if item_type == "file" else None,
+            size=size if item_type == "file" else None,
+        )
+
     def transfer_media(
         self,
         fileitem: FileItem,
@@ -78,6 +98,7 @@ class TransHandler:
         need_notify: Optional[bool] = True,
         overwrite_mode: Optional[str] = None,
         episodes_info: List[TmdbEpisode] = None,
+        preview: Optional[bool] = False,
     ) -> TransferInfo:
         """
         识别并整理一个文件或者一个目录下的所有文件
@@ -94,6 +115,7 @@ class TransHandler:
         :param need_notify: 是否需要通知
         :param overwrite_mode: 覆盖模式
         :param episodes_info: 当前季的全部集信息
+        :param preview: 是否仅预览
         :return: TransferInfo、错误信息
         """
 
@@ -158,6 +180,25 @@ class TransHandler:
                         return result
                 else:
                     new_path = target_path / fileitem.name
+                if preview:
+                    preview_diritem = self.__build_preview_item(
+                        storage=target_storage,
+                        path=new_path,
+                        item_type="dir",
+                    )
+                    self.__update_result(
+                        result=result,
+                        success=True,
+                        fileitem=fileitem,
+                        target_item=preview_diritem,
+                        target_diritem=preview_diritem,
+                        file_list=[fileitem.path],
+                        file_list_new=[new_path.as_posix()],
+                        need_scrape=need_scrape,
+                        need_notify=False,
+                        transfer_type=transfer_type,
+                    )
+                    return result
                 # 原盘大小只计算STREAM目录内的文件大小
                 if stream_fileitem := source_oper.get_item(
                     Path(fileitem.path) / "BDMV" / "STREAM"
@@ -267,6 +308,35 @@ class TransHandler:
                     folder_path = target_path
 
                 # 目标目录
+                if preview:
+                    # 预览只做路径推算，不检查目录或同名文件冲突，避免目标存储探测触发真实整理。
+                    target_diritem = self.__build_preview_item(
+                        storage=target_storage,
+                        path=folder_path,
+                        item_type="dir",
+                    )
+                    target_item = self.__build_preview_item(
+                        storage=target_storage,
+                        path=new_file,
+                        item_type="file",
+                        size=fileitem.size,
+                    )
+                    self.__update_result(
+                        result=result,
+                        success=True,
+                        fileitem=fileitem,
+                        target_item=target_item,
+                        target_diritem=target_diritem,
+                        file_list=[fileitem.path],
+                        file_list_new=[new_file.as_posix()],
+                        file_count=1,
+                        total_size=fileitem.size or 0,
+                        need_scrape=need_scrape,
+                        transfer_type=transfer_type,
+                        need_notify=False,
+                    )
+                    return result
+
                 target_diritem = target_oper.get_folder(folder_path)
                 if not target_diritem:
                     logger.error(f"目标目录 {folder_path} 获取失败")

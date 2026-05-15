@@ -1,10 +1,12 @@
 import asyncio
+from collections import deque
 import importlib
 import io
 import json
 import shutil
 import site
 import sys
+import tempfile
 import threading
 import traceback
 import zipfile
@@ -16,6 +18,7 @@ import aiofiles
 import aioshutil
 import httpx
 from anyio import Path as AsyncPath
+from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from packaging.version import Version, InvalidVersion
@@ -48,6 +51,21 @@ class PluginHelper(metaclass=WeakSingleton):
     _install_statistic = f"{settings.MP_SERVER_HOST}/plugin/statistic"
     # 串行化运行期依赖安装，避免多个 pip 子进程和导入缓存刷新互相踩踏。
     _pip_install_lock = threading.Lock()
+    # 这些包一旦被插件覆盖，最容易直接拖垮主程序启动，因此冲突提示需要单独高亮。
+    _protected_runtime_packages = frozenset({
+        "alembic",
+        "fastapi",
+        "pydantic",
+        "pydantic_core",
+        "pydantic_settings",
+        "sqlalchemy",
+        "starlette",
+        "uvicorn",
+    })
+    _runtime_import_probe = (
+        "import alembic, fastapi, pydantic, pydantic_core, pydantic_settings, "
+        "sqlalchemy, starlette, uvicorn; from pydantic import BaseModel, Field"
+    )
 
     def __init__(self):
         self.systemconfig = SystemConfigOper()
@@ -830,7 +848,426 @@ class PluginHelper(metaclass=WeakSingleton):
         return list(dict.fromkeys(wheels_dirs))
 
     @staticmethod
-    def pip_install_with_fallback(requirements_file: Path,
+    def __build_pip_install_strategies(base_cmd: List[str]) -> List[Tuple[str, List[str]]]:
+        """
+        为 pip 命令构建统一的网络降级策略，避免不同安装路径各自拼接参数。
+        """
+        strategies = []
+        if settings.PIP_PROXY:
+            strategies.append(("镜像站", base_cmd + ["-i", settings.PIP_PROXY]))
+        if settings.PROXY_HOST:
+            strategies.append(("代理", base_cmd + ["--proxy", settings.PROXY_HOST]))
+        strategies.append(("直连", base_cmd))
+        return strategies
+
+    @staticmethod
+    def __build_runtime_pip_command(*args: str) -> List[str]:
+        """
+        优先使用当前解释器同目录的 pip 入口，以便 uv-pip-compat 能接管兼容命令。
+        """
+        pip_name = "pip.exe" if sys.platform == "win32" else "pip"
+        pip_bin = Path(sys.executable).with_name(pip_name)
+        if pip_bin.exists():
+            return [str(pip_bin), *args]
+        return [sys.executable, "-m", "pip", *args]
+
+    @staticmethod
+    def __format_pkg_name_for_pip(name: str) -> str:
+        """
+        将内部统一使用的下划线包名转回 pip 更常见的连字符写法，便于日志和约束文件阅读。
+        """
+        return name.replace("_", "-")
+
+    @staticmethod
+    def __marker_matches(marker, extra: str = "") -> bool:
+        """
+        使用当前运行环境和可选 extra 上下文判断 marker 是否生效。
+        """
+        if not marker:
+            return True
+        try:
+            env = default_environment()
+            env["extra"] = extra
+            return marker.evaluate(env)
+        except Exception as err:
+            logger.debug(f"依赖 marker 计算失败，按不匹配处理：{err}")
+            return False
+
+    @classmethod
+    def __parse_project_requirement_roots(
+            cls,
+            requirements_file: Path,
+            visited_files: Optional[Set[Path]] = None
+    ) -> Dict[str, Set[str]]:
+        """
+        解析主项目 requirements 文件，收集根依赖及其启用的 extras。
+        支持递归处理 -r/--requirement，忽略索引、约束等 pip 选项。
+        """
+        roots = {}
+        if visited_files is None:
+            visited_files = set()
+
+        try:
+            requirements_file = requirements_file.resolve()
+        except Exception:
+            requirements_file = Path(requirements_file)
+
+        if requirements_file in visited_files:
+            return roots
+        visited_files.add(requirements_file)
+
+        if not requirements_file.exists():
+            logger.warning(f"主项目依赖文件不存在：{requirements_file}")
+            return roots
+
+        try:
+            with open(requirements_file, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+
+                    include_path = None
+                    if line.startswith("-r"):
+                        include_path = line[2:].strip() if line != "-r" else ""
+                    elif line.startswith("--requirement"):
+                        include_path = line[len("--requirement"):].strip()
+
+                    if include_path is not None:
+                        if include_path.startswith("="):
+                            include_path = include_path[1:].strip()
+                        if not include_path:
+                            logger.debug(f"忽略无法识别的 requirements 引用：{line}")
+                            continue
+                        included_roots = cls.__parse_project_requirement_roots(
+                            requirements_file.parent / include_path,
+                            visited_files
+                        )
+                        for package_name, extras in included_roots.items():
+                            roots.setdefault(package_name, set()).update(extras)
+                        continue
+
+                    if line.startswith((
+                            "-c", "--constraint", "-i", "--index-url", "--extra-index-url",
+                            "-f", "--find-links", "--trusted-host", "--no-index"
+                    )):
+                        continue
+
+                    try:
+                        requirement = Requirement(line)
+                    except Exception as err:
+                        logger.debug(f"无法解析主项目依赖项 '{line}'：{err}")
+                        continue
+
+                    if not cls.__marker_matches(requirement.marker):
+                        continue
+
+                    package_name = cls.__standardize_pkg_name(requirement.name)
+                    roots.setdefault(package_name, set()).update(
+                        extra.lower() for extra in requirement.extras
+                    )
+            return roots
+        except Exception as e:
+            logger.error(f"解析主项目依赖文件失败：{requirements_file} - {e}")
+            return {}
+
+    @classmethod
+    def __get_installed_distribution_requirements(cls) -> Dict[str, Tuple[Version, List[Requirement]]]:
+        """
+        获取当前环境中每个已安装包的依赖声明，用于展开主程序依赖图。
+        """
+        requirement_graph = {}
+        try:
+            for dist in distributions():
+                name = dist.metadata.get("Name")
+                if not name:
+                    continue
+
+                package_name = cls.__standardize_pkg_name(name)
+                version_str = dist.metadata.get("Version") or getattr(dist, "version", None)
+                if not version_str:
+                    continue
+
+                try:
+                    version = Version(version_str)
+                except InvalidVersion:
+                    logger.debug(f"无法解析已安装包 '{package_name}' 的版本：{version_str}")
+                    continue
+
+                requirements = []
+                for raw_requirement in dist.requires or []:
+                    try:
+                        requirements.append(Requirement(raw_requirement))
+                    except Exception as err:
+                        logger.debug(f"无法解析已安装包 '{package_name}' 的依赖项 '{raw_requirement}'：{err}")
+
+                if package_name not in requirement_graph or version > requirement_graph[package_name][0]:
+                    requirement_graph[package_name] = (version, requirements)
+            return requirement_graph
+        except Exception as e:
+            logger.error(f"收集已安装包依赖图时发生错误：{e}")
+            return {}
+
+    @classmethod
+    def __get_protected_runtime_packages(
+            cls,
+            installed_packages: Optional[Dict[str, Version]] = None
+    ) -> Dict[str, Version]:
+        """
+        仅收集主程序依赖图中的已安装包版本。
+
+        主项目 requirements 中声明的根依赖及其当前已安装的传递依赖都会被冻结，
+        未被主程序依赖图引用的插件自带包允许后续插件按需升级或降级。
+        """
+        if installed_packages is None:
+            installed_packages = cls.__get_installed_packages()
+        protected_packages = {
+            package_name: version
+            for package_name, version in installed_packages.items()
+            if package_name in cls._protected_runtime_packages
+        }
+
+        root_requirements_file = settings.ROOT_PATH / "requirements.txt"
+        if not root_requirements_file.exists():
+            root_requirements_file = settings.ROOT_PATH / "requirements.in"
+
+        root_requirements = cls.__parse_project_requirement_roots(root_requirements_file)
+        if not root_requirements:
+            return protected_packages
+
+        requirement_graph = cls.__get_installed_distribution_requirements()
+        active_extras = {
+            package_name: set(extras)
+            for package_name, extras in root_requirements.items()
+        }
+        pending_packages = deque(active_extras.keys())
+        processed_extras: Dict[str, Set[str]] = {}
+
+        while pending_packages:
+            package_name = pending_packages.popleft()
+            selected_extras = active_extras.get(package_name, set())
+            previous_extras = processed_extras.get(package_name)
+            if previous_extras is not None and selected_extras.issubset(previous_extras):
+                continue
+
+            processed_extras[package_name] = set(selected_extras)
+            if package_name in installed_packages:
+                protected_packages[package_name] = installed_packages[package_name]
+
+            _, requirements = requirement_graph.get(package_name, (None, []))
+            if not requirements:
+                continue
+
+            active_extra_values = [""] + sorted(selected_extras)
+            for requirement in requirements:
+                if requirement.marker and not any(
+                        cls.__marker_matches(requirement.marker, extra)
+                        for extra in active_extra_values
+                ):
+                    continue
+
+                dep_name = cls.__standardize_pkg_name(requirement.name)
+                known_extras = active_extras.setdefault(dep_name, set())
+                before_len = len(known_extras)
+                known_extras.update(extra.lower() for extra in requirement.extras)
+                if dep_name not in processed_extras or len(known_extras) != before_len:
+                    pending_packages.append(dep_name)
+
+        return protected_packages
+
+    @staticmethod
+    def __is_upgrade_only_conflict(specifier_set: SpecifierSet, installed_version: Version) -> bool:
+        """
+        判断版本冲突是否只能通过升级来解决（specifier 允许的所有版本都严格高于已安装版本）。
+        返回 True 表示纯升级冲突；返回 False 表示可能需要降级或无法确定方向。
+        """
+        has_lower_bound = False
+        for spec in specifier_set:
+            op = spec.operator
+            ver_str = spec.version.rstrip("*").rstrip(".") or "0"
+            try:
+                ver = Version(ver_str)
+            except InvalidVersion:
+                return False
+
+            if op in ("<", "<="):
+                upper = ver if op == "<" else Version(f"{ver}.post0")
+                if upper <= installed_version:
+                    return False
+            elif op == "==":
+                if ver <= installed_version:
+                    return False
+            elif op == "~=":
+                # ~=X.Y.Z 等价于 >=X.Y.Z, <X.(Y+1)；若 X.Y.Z <= 已安装版本说明需降级
+                if ver <= installed_version:
+                    return False
+                has_lower_bound = True
+            elif op in (">=", ">"):
+                has_lower_bound = True
+            # != 操作符：单独出现时可能允许低版本，需结合其他约束判断
+
+        # 若没有任何明确的下限约束（仅 != 等），保守地视为不确定 → 返回 False
+        return has_lower_bound
+
+    @classmethod
+    def __validate_runtime_dependency_conflicts(
+            cls,
+            requirements_file: Path,
+            protected_packages: Dict[str, Version]
+    ) -> Tuple[bool, str]:
+        """
+        在真正执行 pip 前，先拦截插件对主程序依赖的显式覆盖请求。
+
+        共享 venv 场景下，仅冻结主程序依赖；插件新增依赖、以及插件之间共享的额外依赖，
+        允许后续安装继续调整版本。
+        """
+        conflicts = []
+        try:
+            with open(requirements_file, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    try:
+                        requirement = Requirement(line)
+                    except Exception as err:
+                        logger.debug(f"无法解析依赖项 '{line}'，跳过运行环境冲突预检：{err}")
+                        continue
+
+                    if not cls.__marker_matches(requirement.marker):
+                        continue
+
+                    package_name = cls.__standardize_pkg_name(requirement.name)
+                    installed_version = protected_packages.get(package_name)
+                    if installed_version is None:
+                        continue
+
+                    if requirement.url:
+                        conflicts.append((
+                            package_name,
+                            str(installed_version),
+                            f"来自 {requirement.url} 的同名包",
+                            package_name in cls._protected_runtime_packages,
+                        ))
+                        continue
+
+                    if requirement.specifier and not requirement.specifier.contains(
+                            installed_version,
+                            prereleases=True
+                    ):
+                        is_core = package_name in cls._protected_runtime_packages
+                        # 非核心包的纯升级冲突（插件要求更新版本）允许放行，由 pip 约束文件控制实际安装
+                        if is_core or not cls.__is_upgrade_only_conflict(
+                                requirement.specifier, installed_version):
+                            conflicts.append((
+                                package_name,
+                                str(installed_version),
+                                str(requirement.specifier),
+                                is_core,
+                            ))
+        except Exception as e:
+            logger.error(f"执行运行环境依赖冲突预检时发生错误：{e}")
+            return False, f"插件依赖预检失败：{e}"
+
+        if not conflicts:
+            return True, ""
+
+        def sort_key(item: Tuple[str, str, str, bool]) -> Tuple[int, str]:
+            return 0 if item[3] else 1, item[0]
+
+        details = []
+        for package_name, installed_version, expected, _is_protected in sorted(conflicts, key=sort_key)[:5]:
+            details.append(
+                f"{cls.__format_pkg_name_for_pip(package_name)} 当前为 {installed_version}，"
+                f"插件要求 {expected}"
+            )
+        if len(conflicts) > 5:
+            details.append(f"其余 {len(conflicts) - 5} 项冲突已省略")
+
+        scope = "主程序核心依赖" if any(item[3] for item in conflicts) else "主程序依赖"
+        return False, (
+            f"插件依赖与当前运行环境的{scope}冲突：{'；'.join(details)}。"
+            f"为避免共享运行环境被污染，已拒绝安装。"
+        )
+
+    @classmethod
+    def __create_runtime_constraints_file(cls, protected_packages: Dict[str, Version]) -> Path:
+        """
+        以主程序依赖的当前已安装版本生成临时约束文件，确保插件安装不会改写主程序依赖。
+        """
+        temp_dir = Path(settings.TEMP_PATH) / "plugin_dependencies"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=temp_dir,
+                prefix="runtime-constraints-",
+                suffix=".txt",
+                delete=False
+        ) as temp_file:
+            for package_name, version in sorted(protected_packages.items()):
+                if package_name in cls._protected_runtime_packages:
+                    # 核心包严格锁定，插件不得改写
+                    temp_file.write(f"{cls.__format_pkg_name_for_pip(package_name)}=={version}\n")
+                else:
+                    # 非核心主程序依赖：允许升级，但禁止降级
+                    temp_file.write(f"{cls.__format_pkg_name_for_pip(package_name)}>={version}\n")
+        return Path(temp_file.name)
+
+    @staticmethod
+    def __refresh_import_system():
+        """
+        依赖安装或修复后刷新当前解释器的导入缓存，保证后续动态导入能看到新状态。
+        """
+        importlib.reload(site)
+        importlib.invalidate_caches()
+
+    @classmethod
+    def __run_runtime_healthcheck(cls) -> Tuple[bool, str]:
+        """
+        安装完成后立即执行运行环境自检，尽量在插件加载前发现依赖图已被污染。
+        """
+        checks = [
+            ("pip check", cls.__build_runtime_pip_command("check")),
+            ("核心依赖导入检查", [sys.executable, "-c", cls._runtime_import_probe]),
+        ]
+        for check_name, command in checks:
+            success, message = SystemUtils.execute_with_subprocess(command)
+            if not success:
+                return False, f"{check_name}失败：{message}"
+        return True, ""
+
+    @classmethod
+    def __repair_main_runtime_dependencies(cls, snapshot_file: Optional[Path] = None) -> Tuple[bool, str]:
+        """
+        依赖安装后如果发现主运行环境已异常，优先恢复主程序依赖快照；
+        若快照不可用，再按主项目依赖重新安装进行自愈。
+        """
+        repair_target = snapshot_file
+        repair_desc = "主程序依赖快照"
+        if repair_target and not repair_target.exists():
+            repair_target = None
+        if repair_target is None:
+            repair_target = settings.ROOT_PATH / "requirements.txt"
+            repair_desc = "主程序 requirements.txt"
+        if not repair_target.exists():
+            return False, f"恢复依赖文件不存在：{repair_target}"
+
+        last_error = ""
+        base_cmd = [sys.executable, "-m", "pip", "install", "-r", str(repair_target)]
+        for strategy_name, pip_command in cls.__build_pip_install_strategies(base_cmd):
+            logger.warning(f"[PIP] 运行环境异常，尝试使用策略：{strategy_name} 恢复{repair_desc}")
+            success, message = SystemUtils.execute_with_subprocess(pip_command)
+            if success:
+                cls.__refresh_import_system()
+                return True, message
+            last_error = message
+            logger.error(f"[PIP] 使用策略：{strategy_name} 恢复{repair_desc}失败：{message}")
+        return False, last_error or f"恢复{repair_desc}失败"
+
+    @classmethod
+    def pip_install_with_fallback(cls,
+                                  requirements_file: Path,
                                   find_links_dirs: Optional[List[Path]] = None) -> Tuple[bool, str]:
         """
         使用自动降级策略安装依赖，并确保新安装的包可被动态导入
@@ -866,36 +1303,75 @@ class PluginHelper(metaclass=WeakSingleton):
         else:
             logger.debug(f"[PIP] 未发现可用的 wheels 目录，将仅使用在线源。")
 
-        base_cmd = [sys.executable, "-m", "pip", "install"] + find_links_option + ["-r", str(requirements_file)]
-        strategies = []
+        installed_packages = cls.__get_installed_packages()
+        protected_packages = cls.__get_protected_runtime_packages(installed_packages)
+        check_ok, check_message = cls.__validate_runtime_dependency_conflicts(requirements_file, protected_packages)
+        if not check_ok:
+            logger.error(f"[PIP] 运行环境冲突预检失败：{check_message}")
+            return False, check_message
 
-        # 添加策略到列表中
-        if settings.PIP_PROXY:
-            strategies.append(("镜像站", base_cmd + ["-i", settings.PIP_PROXY]))
-        if settings.PROXY_HOST:
-            strategies.append(("代理", base_cmd + ["--proxy", settings.PROXY_HOST]))
-        strategies.append(("直连", base_cmd))
+        constraints_file = None
+        if protected_packages:
+            try:
+                constraints_file = cls.__create_runtime_constraints_file(protected_packages)
+            except Exception as e:
+                logger.error(f"[PIP] 创建运行环境约束文件失败：{e}")
+                return False, f"创建运行环境约束文件失败：{e}"
 
-        # pip 会修改当前解释器的 site-packages，安装与缓存刷新必须串行，避免运行态模块被并发安装窗口污染。
-        with PluginHelper._pip_install_lock:
-            loaded_modules_before_install = set(sys.modules.keys())
-            # 遍历策略进行安装
-            for strategy_name, pip_command in strategies:
-                logger.debug(f"[PIP] 尝试使用策略：{strategy_name} 安装依赖，命令：{' '.join(pip_command)}")
-                success, message = SystemUtils.execute_with_subprocess(pip_command)
-                if success:
-                    logger.debug(f"[PIP] 策略：{strategy_name} 安装依赖成功，输出：{message}")
-                    # 刷新导入系统即可发现新安装依赖，同时保持安装窗口内的运行态模块缓存稳定。
-                    importlib.reload(site)
-                    importlib.invalidate_caches()
-                    loaded_modules_after_install = set(sys.modules.keys())
-                    loaded_modules_during_install = loaded_modules_after_install - loaded_modules_before_install
-                    logger.debug(f"[PIP] 已刷新导入系统，新加载的模块: {loaded_modules_during_install}")
-                    return True, message
-                else:
+        base_cmd = [sys.executable, "-m", "pip", "install"] + find_links_option
+        if constraints_file:
+            # 这里固定约束到主程序依赖的当前版本，避免共享 venv 被插件改写核心运行环境。
+            base_cmd.extend(["-c", str(constraints_file)])
+        base_cmd.extend(["-r", str(requirements_file)])
+        strategies = cls.__build_pip_install_strategies(base_cmd)
+
+        try:
+            # pip 会修改当前解释器的 site-packages，安装与缓存刷新必须串行，避免运行态模块被并发安装窗口污染。
+            with cls._pip_install_lock:
+                loaded_modules_before_install = set(sys.modules.keys())
+                # 遍历策略进行安装
+                for strategy_name, pip_command in strategies:
+                    logger.debug(f"[PIP] 尝试使用策略：{strategy_name} 安装依赖，命令：{' '.join(pip_command)}")
+                    success, message = SystemUtils.execute_with_subprocess(pip_command)
+                    if success:
+                        logger.debug(f"[PIP] 策略：{strategy_name} 安装依赖成功，输出：{message}")
+                        health_ok, health_message = cls.__run_runtime_healthcheck()
+                        if not health_ok:
+                            logger.error(f"[PIP] 依赖安装后运行环境自检失败：{health_message}")
+                            repair_ok, repair_message = cls.__repair_main_runtime_dependencies(
+                                constraints_file if protected_packages else None
+                            )
+                            if repair_ok:
+                                health_restored, restored_message = cls.__run_runtime_healthcheck()
+                                if health_restored:
+                                    cls.__refresh_import_system()
+                                    return False, (
+                                        f"依赖安装后运行环境自检失败，已自动恢复主程序依赖：{health_message}"
+                                    )
+                                logger.error(
+                                    f"[PIP] 主程序依赖恢复后仍未通过健康检查：{restored_message}"
+                                )
+                                return False, (
+                                    f"依赖安装后运行环境自检失败，恢复主程序依赖后仍异常："
+                                    f"{restored_message}"
+                                )
+                            return False, (
+                                f"依赖安装后运行环境自检失败，且自动恢复主程序依赖失败："
+                                f"{repair_message}"
+                            )
+
+                        cls.__refresh_import_system()
+                        loaded_modules_after_install = set(sys.modules.keys())
+                        loaded_modules_during_install = loaded_modules_after_install - loaded_modules_before_install
+                        logger.debug(f"[PIP] 已刷新导入系统，新加载的模块: {loaded_modules_during_install}")
+                        return True, message
+
                     logger.error(f"[PIP] 策略：{strategy_name} 安装依赖失败，错误信息：{message}")
+        finally:
+            if constraints_file:
+                constraints_file.unlink(missing_ok=True)
 
-        return False, "[PIP] 所有策略均安装依赖失败，请检查网络连接或 PIP 配置"
+        return False, "[PIP] 所有策略均安装依赖失败，请检查网络连接、PIP 配置或插件依赖约束"
 
     @staticmethod
     def __request_with_fallback(url: str,
@@ -1129,7 +1605,8 @@ class PluginHelper(metaclass=WeakSingleton):
             logger.error(f"安装依赖项时发生错误：{e}")
             return False, f"安装依赖项时发生错误：{e}"
 
-    def __get_installed_packages(self) -> Dict[str, Version]:
+    @classmethod
+    def __get_installed_packages(cls) -> Dict[str, Version]:
         """
         获取已安装的包及其版本
         使用 importlib.metadata 获取当前环境中已安装的包，标准化包名并转换版本信息
@@ -1142,7 +1619,7 @@ class PluginHelper(metaclass=WeakSingleton):
                 name = dist.metadata.get("Name")
                 if not name:
                     continue
-                pkg_name = self.__standardize_pkg_name(name)
+                pkg_name = cls.__standardize_pkg_name(name)
                 version_str = dist.metadata.get("Version") or getattr(dist, "version", None)
                 if not version_str:
                     continue

@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from app.agent.llm.capability import AgentCapabilityManager
 from app.core.config import settings
 from app.log import logger
 from app.schemas import (
@@ -286,8 +287,10 @@ class PromptManager:
                 f"{settings.DB_POSTGRESQL_TARGET}/{settings.DB_POSTGRESQL_DATABASE})"
             )
 
+        # 保留日期用于提供“今天是哪天”的稳定上下文，但不再注入秒级时间，
+        # 避免每次请求都生成不同的 system prompt，影响 provider 侧 cache 命中率。
         info_lines = [
-            f"- 当前时间: {strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- 当前日期: {strftime('%Y-%m-%d')}",
             f"- 运行环境: {SystemUtils.platform} {'docker' if SystemUtils.is_docker() else ''}",
             f"- 主机名: {hostname}",
             f"- IP地址: {ip_address}",
@@ -310,7 +313,7 @@ class PromptManager:
         根据渠道能力动态生成格式指令
         """
         instructions = []
-        if ChannelCapability.RICH_TEXT not in caps.capabilities:
+        if ChannelCapability.MARKDOWN not in caps.capabilities:
             instructions.append(
                 "- Formatting: Use **Plain Text ONLY**. The channel does NOT support Markdown."
             )
@@ -325,10 +328,12 @@ class PromptManager:
 
     @staticmethod
     def _generate_voice_reply_instructions() -> str:
+        if not AgentCapabilityManager.supports_audio_output():
+            return "Audio output is disabled; do not call `send_voice_message`."
         return (
-            "- Voice replies: Use normal text replies by default. "
-            "Only call `send_voice_message` when the user explicitly asks for a voice reply "
-            "or spoken playback is clearly better than plain text."
+            "Use normal text replies by default. Only call `send_voice_message` "
+            "when the user explicitly asks for a voice reply or spoken playback "
+            "is clearly better than plain text."
         )
 
     @staticmethod
@@ -426,11 +431,11 @@ class PromptManager:
             return text
 
         context = cls._normalize_template_context(template_context)
-        missing_fields = sorted(field for field in required_fields if field not in context)
+        missing_fields = sorted(f for f in required_fields if f not in context)
         if missing_fields:
             raise PromptConfigError(
                 f"系统任务定义 `{task_type}` 的 `{field_name}` 缺少变量: "
-                + ", ".join(f"`{field}`" for field in missing_fields)
+                + ", ".join(f"`{f}`" for f in missing_fields)
             )
 
         # 这里统一做字符串替换，让 YAML 成为后台任务文案的唯一行为来源。

@@ -1,4 +1,6 @@
+import fnmatch
 import math
+import re
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -12,7 +14,10 @@ from app.chain.transfer import TransferChain
 from app.core.config import settings
 from app.core.security import verify_token
 from app.db.models import User
-from app.db.user_oper import get_current_active_superuser, get_current_active_superuser_async
+from app.db.user_oper import (
+    get_current_active_superuser,
+    get_current_active_superuser_async,
+)
 from app.helper.progress import ProgressHelper
 from app.schemas.types import ProgressKey
 from app.utils.string import StringUtils
@@ -31,7 +36,9 @@ def qrcode(name: str, _: schemas.TokenPayload = Depends(verify_token)) -> Any:
     return schemas.Response(success=False, message=errmsg)
 
 
-@router.get("/auth_url/{name}", summary="获取 OAuth2 授权 URL", response_model=schemas.Response)
+@router.get(
+    "/auth_url/{name}", summary="获取 OAuth2 授权 URL", response_model=schemas.Response
+)
 def auth_url(name: str, _: schemas.TokenPayload = Depends(verify_token)) -> Any:
     """
     获取 OAuth2 授权 URL
@@ -43,8 +50,12 @@ def auth_url(name: str, _: schemas.TokenPayload = Depends(verify_token)) -> Any:
 
 
 @router.get("/check/{name}", summary="二维码登录确认", response_model=schemas.Response)
-def check(name: str, ck: Optional[str] = None, t: Optional[str] = None,
-          _: schemas.TokenPayload = Depends(verify_token)) -> Any:
+def check(
+    name: str,
+    ck: Optional[str] = None,
+    t: Optional[str] = None,
+    _: schemas.TokenPayload = Depends(verify_token),
+) -> Any:
     """
     二维码登录确认
     """
@@ -58,9 +69,7 @@ def check(name: str, ck: Optional[str] = None, t: Optional[str] = None,
 
 
 @router.post("/save/{name}", summary="保存存储配置", response_model=schemas.Response)
-def save(name: str,
-         conf: dict,
-         _: User = Depends(get_current_active_superuser)) -> Any:
+def save(name: str, conf: dict, _: User = Depends(get_current_active_superuser)) -> Any:
     """
     保存存储配置
     """
@@ -69,8 +78,7 @@ def save(name: str,
 
 
 @router.get("/reset/{name}", summary="重置存储配置", response_model=schemas.Response)
-def reset(name: str,
-          _: User = Depends(get_current_active_superuser)) -> Any:
+def reset(name: str, _: User = Depends(get_current_active_superuser)) -> Any:
     """
     重置存储配置
     """
@@ -79,18 +87,25 @@ def reset(name: str,
 
 
 @router.post("/list", summary="所有目录和文件", response_model=List[schemas.FileItem])
-def list_files(fileitem: schemas.FileItem,
-               sort: Optional[str] = 'updated_at',
-               _: User = Depends(get_current_active_superuser)) -> Any:
+def list_files(
+    fileitem: schemas.FileItem,
+    sort: Optional[str] = "updated_at",
+    keyword: Optional[str] = None,
+    _: User = Depends(get_current_active_superuser),
+) -> Any:
     """
     查询当前目录下所有目录和文件
     :param fileitem: 文件项
     :param sort: 排序方式，name:按名称排序，time:按修改时间排序
+    :param keyword: 通配符过滤，支持 * 和 ?，如 *.mkv、movie?.*
     :param _: token
     :return: 所有目录和文件
     """
     file_list = StorageChain().list_files(fileitem)
     if file_list:
+        if keyword:
+            _pat = re.compile(fnmatch.translate(keyword), re.IGNORECASE)
+            file_list = [f for f in file_list if _pat.match(f.name or "")]
         if sort == "name":
             file_list.sort(key=lambda x: StringUtils.natural_sort_key(x.name or ""))
         else:
@@ -99,9 +114,11 @@ def list_files(fileitem: schemas.FileItem,
 
 
 @router.post("/mkdir", summary="创建目录", response_model=schemas.Response)
-def mkdir(fileitem: schemas.FileItem,
-          name: str,
-          _: User = Depends(get_current_active_superuser)) -> Any:
+def mkdir(
+    fileitem: schemas.FileItem,
+    name: str,
+    _: User = Depends(get_current_active_superuser),
+) -> Any:
     """
     创建目录
     :param fileitem: 文件项
@@ -117,8 +134,9 @@ def mkdir(fileitem: schemas.FileItem,
 
 
 @router.post("/delete", summary="删除文件或目录", response_model=schemas.Response)
-def delete(fileitem: schemas.FileItem,
-           _: User = Depends(get_current_active_superuser)) -> Any:
+def delete(
+    fileitem: schemas.FileItem, _: User = Depends(get_current_active_superuser)
+) -> Any:
     """
     删除文件或目录
     :param fileitem: 文件项
@@ -131,8 +149,9 @@ def delete(fileitem: schemas.FileItem,
 
 
 @router.post("/download", summary="下载文件")
-def download(fileitem: schemas.FileItem,
-             _: User = Depends(get_current_active_superuser)) -> Any:
+def download(
+    fileitem: schemas.FileItem, _: User = Depends(get_current_active_superuser)
+) -> Any:
     """
     下载文件或目录
     :param fileitem: 文件项
@@ -146,8 +165,9 @@ def download(fileitem: schemas.FileItem,
 
 
 @router.post("/image", summary="预览图片")
-def image(fileitem: schemas.FileItem,
-          _: User = Depends(get_current_active_superuser)) -> Any:
+def image(
+    fileitem: schemas.FileItem, _: User = Depends(get_current_active_superuser)
+) -> Any:
     """
     下载文件或目录
     :param fileitem: 文件项
@@ -161,10 +181,12 @@ def image(fileitem: schemas.FileItem,
 
 
 @router.post("/rename", summary="重命名文件或目录", response_model=schemas.Response)
-def rename(fileitem: schemas.FileItem,
-           new_name: str,
-           recursive: Optional[bool] = False,
-           _: User = Depends(get_current_active_superuser)) -> Any:
+def rename(
+    fileitem: schemas.FileItem,
+    new_name: str,
+    recursive: Optional[bool] = False,
+    _: User = Depends(get_current_active_superuser),
+) -> Any:
     """
     重命名文件或目录
     :param fileitem: 文件项
@@ -189,8 +211,9 @@ def rename(fileitem: schemas.FileItem,
             handled = 0
             for sub_file in sub_files:
                 handled += 1
-                progress.update(value=handled / total * 100,
-                                text=f"正在处理 {sub_file.name} ...")
+                progress.update(
+                    value=handled / total * 100, text=f"正在处理 {sub_file.name} ..."
+                )
                 if sub_file.type == "dir":
                     continue
                 if not sub_file.extension:
@@ -204,20 +227,25 @@ def rename(fileitem: schemas.FileItem,
                 )
                 if not context or not context.media_info:
                     progress.end()
-                    return schemas.Response(success=False, message=f"{sub_path.name} 未识别到媒体信息")
+                    return schemas.Response(
+                        success=False, message=f"{sub_path.name} 未识别到媒体信息"
+                    )
                 new_path = transferchain.recommend_name(
-                    meta=context.meta_info,
-                    mediainfo=context.media_info
+                    meta=context.meta_info, mediainfo=context.media_info
                 )
                 if not new_path:
                     progress.end()
-                    return schemas.Response(success=False, message=f"{sub_path.name} 未识别到新名称")
-                ret: schemas.Response = rename(fileitem=sub_file,
-                                               new_name=Path(new_path).name,
-                                               recursive=False)
+                    return schemas.Response(
+                        success=False, message=f"{sub_path.name} 未识别到新名称"
+                    )
+                ret: schemas.Response = rename(
+                    fileitem=sub_file, new_name=Path(new_path).name, recursive=False
+                )
                 if not ret.success:
                     progress.end()
-                    return schemas.Response(success=False, message=f"{sub_path.name} 重命名失败！")
+                    return schemas.Response(
+                        success=False, message=f"{sub_path.name} 重命名失败！"
+                    )
             progress.end()
     # 重命名自己
     result = StorageChain().rename_file(fileitem, new_name)
@@ -226,7 +254,9 @@ def rename(fileitem: schemas.FileItem,
     return schemas.Response(success=False)
 
 
-@router.get("/usage/{name}", summary="存储空间信息", response_model=schemas.StorageUsage)
+@router.get(
+    "/usage/{name}", summary="存储空间信息", response_model=schemas.StorageUsage
+)
 def usage(name: str, _: User = Depends(get_current_active_superuser)) -> Any:
     """
     查询存储空间
@@ -237,8 +267,14 @@ def usage(name: str, _: User = Depends(get_current_active_superuser)) -> Any:
     return schemas.StorageUsage()
 
 
-@router.get("/transtype/{name}", summary="支持的整理方式获取", response_model=schemas.StorageTransType)
-async def transtype(name: str, _: User = Depends(get_current_active_superuser_async)) -> Any:
+@router.get(
+    "/transtype/{name}",
+    summary="支持的整理方式获取",
+    response_model=schemas.StorageTransType,
+)
+async def transtype(
+    name: str, _: User = Depends(get_current_active_superuser_async)
+) -> Any:
     """
     查询支持的整理方式
     """

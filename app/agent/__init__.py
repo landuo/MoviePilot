@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
+from fastapi.concurrency import run_in_threadpool
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     SummarizationMiddleware,
@@ -16,13 +17,21 @@ from langchain_core.messages import (  # noqa: F401
     HumanMessage,
     BaseMessage,
 )
+
+import warnings
+warnings.filterwarnings("ignore", message=".*allowed_objects.*")
+
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.callback import StreamingHandler
 from app.agent.llm import LLMHelper
 from app.agent.memory import memory_manager
 from app.agent.middleware.activity_log import ActivityLogMiddleware
-from app.agent.middleware.jobs import JobsMiddleware
+from app.agent.middleware.jobs import (
+    JobsMiddleware,
+    filter_active_jobs,
+    load_jobs_metadata,
+)
 from app.agent.middleware.memory import MemoryMiddleware
 from app.agent.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from app.agent.middleware.runtime_config import RuntimeConfigMiddleware
@@ -43,6 +52,40 @@ from app.utils.identity import SYSTEM_INTERNAL_USER_ID
 
 class AgentChain(ChainBase):
     pass
+
+
+def _finish_processing_status(status: Optional[dict], user_id: Optional[str] = None) -> None:
+    """结束入站消息的渠道处理状态。"""
+    if not status:
+        return
+    try:
+        channel = MessageChannel(status.get("channel"))
+    except Exception:
+        return
+    try:
+        AgentChain().run_module(
+            "mark_message_processing_finished",
+            channel=channel,
+            source=status.get("source"),
+            userid=status.get("userid") or user_id,
+            message_id=status.get("message_id"),
+            chat_id=status.get("chat_id"),
+            status=status,
+        )
+    except Exception as err:
+        logger.debug(f"结束Agent消息处理状态失败: {err}")
+
+
+async def _async_finish_processing_status(
+        status: Optional[dict], user_id: Optional[str] = None
+) -> None:
+    """
+    在 Agent worker 中结束渠道处理状态。
+    渠道收口可能触发外部 API，同步实现需切到线程池避免阻塞事件循环。
+    """
+    if not status:
+        return
+    await run_in_threadpool(_finish_processing_status, status, user_id)
 
 
 @dataclass
@@ -160,6 +203,10 @@ class ReplyMode(str, Enum):
     CAPTURE_ONLY = "capture_only"
 
 
+HEARTBEAT_SESSION_PREFIX = "__agent_heartbeat_"
+UNSUPPORTED_IMAGE_INPUT_MESSAGE = "当前模型不支持图片输入，请更换支持图片输入的模型，或在系统设置中关闭图片输入支持后重试。"
+
+
 class MoviePilotAgent:
     """
     MoviePilot AI智能体（基于 LangChain v1 + LangGraph）
@@ -172,6 +219,8 @@ class MoviePilotAgent:
             channel: str = None,
             source: str = None,
             username: str = None,
+            original_message_id: Optional[str] = None,
+            original_chat_id: Optional[str] = None,
             replay_mode: ReplyMode = ReplyMode.DISPATCH,
             persist_output_message: bool = True,
             allow_message_tools: bool = True,
@@ -182,6 +231,8 @@ class MoviePilotAgent:
         self.channel = channel
         self.source = source
         self.username = username
+        self.original_message_id = original_message_id
+        self.original_chat_id = original_chat_id
         self.reply_mode = replay_mode
         self.persist_output_message = persist_output_message
         self.allow_message_tools = allow_message_tools
@@ -288,6 +339,16 @@ class MoviePilotAgent:
         """
         return self.reply_mode == ReplyMode.DISPATCH
 
+    @property
+    def is_heartbeat_session(self) -> bool:
+        """
+        是否为后台心跳会话。
+
+        心跳场景只负责检查并执行待处理 job，不需要携带近期活动日志，
+        否则会让这类高频后台调用持续带入无关动态上下文，影响缓存命中率。
+        """
+        return self.session_id.startswith(HEARTBEAT_SESSION_PREFIX)
+
     def _should_stream(self) -> bool:
         """
         判断是否应启用流式输出：
@@ -350,6 +411,92 @@ class MoviePilotAgent:
                         text_parts.append(str(block))
             return "".join(text_parts)
         return str(content)
+
+    @classmethod
+    def _has_image_input_content(cls, content: Any) -> bool:
+        """
+        检查消息内容里是否包含真正会发给模型的图片块。
+        结构化 JSON 文本里的 images 字段只是给 Agent 阅读的说明，不能作为图片输入判断。
+        """
+        if isinstance(content, list):
+            return any(cls._has_image_input_content(item) for item in content)
+        if not isinstance(content, dict):
+            return False
+
+        block_type = str(content.get("type") or "").lower()
+        if block_type in {"image", "image_url", "input_image"}:
+            return True
+        if content.get("image_url") or content.get("image"):
+            return True
+        return any(cls._has_image_input_content(value) for value in content.values())
+
+    @classmethod
+    def _messages_have_image_input(cls, messages: List[BaseMessage]) -> bool:
+        """检查本轮提交给模型的消息列表中是否包含图片输入。"""
+        return any(
+            cls._has_image_input_content(getattr(message, "content", None))
+            for message in messages or []
+        )
+
+    @staticmethod
+    def _exception_detail_text(error: Exception) -> str:
+        """
+        提取异常对象里可用于匹配的文本。
+        OpenAI 兼容端点的错误详情可能藏在 body/code/status_code 等属性中。
+        """
+        parts = [str(error)]
+        for attr in ("message", "code", "status_code"):
+            value = getattr(error, attr, None)
+            if value is not None:
+                parts.append(str(value))
+        body = getattr(error, "body", None)
+        if body is not None:
+            try:
+                parts.append(json.dumps(body, ensure_ascii=False))
+            except (TypeError, ValueError):
+                parts.append(str(body))
+        return " ".join(part for part in parts if part)
+
+    @classmethod
+    def _is_unsupported_image_input_error(cls, error: Exception) -> bool:
+        """
+        判断模型服务是否在拒绝图片输入。
+        兼容 OpenAI 及 OpenAI-compatible 服务常见的错误文案，避免把普通 404 当作图片能力问题。
+        """
+        detail = cls._exception_detail_text(error).lower()
+        if "no endpoints found that support image input" in detail:
+            return True
+        if "image input" not in detail and "images" not in detail:
+            return False
+        return any(
+            marker in detail
+            for marker in (
+                "does not support",
+                "do not support",
+                "not support",
+                "not supported",
+                "unsupported",
+                "no endpoint",
+                "no endpoints",
+            )
+        )
+
+    async def _dispatch_execution_notice(self, message: str) -> None:
+        """
+        将执行层可预期的失败转成用户可读提示。
+        按当前回复模式处理，避免后台捕获任务绕过 CAPTURE_ONLY 约束。
+        """
+        if not message:
+            return
+        self._emit_output(message)
+        if self._tool_context.get("user_reply_sent"):
+            return
+
+        title = "MoviePilot助手" if self.is_background else ""
+        if self.should_dispatch_reply:
+            await self.send_agent_message(message, title=title)
+        elif self.persist_output_message:
+            await self._save_agent_message_to_db(message, title=title)
 
     def _emit_output(self, text: str):
         """
@@ -430,10 +577,6 @@ class MoviePilotAgent:
                 RuntimeConfigMiddleware(),
                 # 记忆管理
                 MemoryMiddleware(memory_dir=str(agent_runtime_manager.memory_dir)),
-                # 活动日志
-                ActivityLogMiddleware(
-                    activity_dir=str(agent_runtime_manager.activity_dir),
-                ),
                 # 上下文压缩
                 SummarizationMiddleware(
                     model=non_streaming_model, trigger=("fraction", 0.85)
@@ -443,6 +586,14 @@ class MoviePilotAgent:
                 # 用量统计
                 UsageMiddleware(on_usage=self._record_usage),
             ]
+
+            if not self.is_heartbeat_session:
+                middlewares.insert(
+                    4,
+                    ActivityLogMiddleware(
+                        activity_dir=str(agent_runtime_manager.activity_dir),
+                    ),
+                )
 
             # 工具选择
             if max_tools > 0:
@@ -598,6 +749,8 @@ class MoviePilotAgent:
                     source=self.source,
                     user_id=self.user_id,
                     username=self.username,
+                    original_message_id=self.original_message_id,
+                    original_chat_id=self.original_chat_id,
                 )
 
                 # 流式运行智能体，token 直接推送到 stream_handler
@@ -710,6 +863,12 @@ class MoviePilotAgent:
             logger.info(f"Agent执行被取消: session_id={self.session_id}")
             return "任务已取消", {}
         except Exception as e:
+            if self._messages_have_image_input(messages) and self._is_unsupported_image_input_error(e):
+                logger.warning(
+                    f"当前模型不支持图片输入，已向用户发送友好提示: {e}"
+                )
+                await self._dispatch_execution_notice(UNSUPPORTED_IMAGE_INPUT_MESSAGE)
+                return UNSUPPORTED_IMAGE_INPUT_MESSAGE, {}
             logger.error(f"Agent执行失败: {e} - {traceback.format_exc()}")
             return str(e), {}
         finally:
@@ -727,6 +886,8 @@ class MoviePilotAgent:
                 mtype=NotificationType.Agent,
                 userid=self.user_id,
                 username=self.username,
+                original_message_id=self.original_message_id,
+                original_chat_id=self.original_chat_id,
                 title=title,
                 text=message,
             )
@@ -773,6 +934,9 @@ class _MessageTask:
     channel: Optional[str] = None
     source: Optional[str] = None
     username: Optional[str] = None
+    original_message_id: Optional[str] = None
+    original_chat_id: Optional[str] = None
+    processing_status: Optional[dict] = None
     reply_mode: ReplyMode = ReplyMode.DISPATCH
 
 
@@ -857,6 +1021,9 @@ class AgentManager:
             channel: str = None,
             source: str = None,
             username: str = None,
+            original_message_id: Optional[str] = None,
+            original_chat_id: Optional[str] = None,
+            processing_status: Optional[dict] = None,
             reply_mode: ReplyMode = ReplyMode.DISPATCH,
     ) -> str:
         """
@@ -872,6 +1039,9 @@ class AgentManager:
             channel=channel,
             source=source,
             username=username,
+            original_message_id=original_message_id,
+            original_chat_id=original_chat_id,
+            processing_status=processing_status,
             reply_mode=reply_mode,
         )
 
@@ -930,6 +1100,9 @@ class AgentManager:
                 except Exception as e:
                     logger.error(f"处理会话 {session_id} 的消息失败: {e}")
                 finally:
+                    await _async_finish_processing_status(
+                        task.processing_status, task.user_id
+                    )
                     queue.task_done()
 
         except asyncio.CancelledError:
@@ -959,6 +1132,8 @@ class AgentManager:
                 channel=task.channel,
                 source=task.source,
                 username=task.username,
+                original_message_id=task.original_message_id,
+                original_chat_id=task.original_chat_id,
                 replay_mode=task.reply_mode,
             )
             self.active_agents[session_id] = agent
@@ -971,6 +1146,8 @@ class AgentManager:
                 agent.source = task.source
             if task.username:
                 agent.username = task.username
+            agent.original_message_id = task.original_message_id
+            agent.original_chat_id = task.original_chat_id
             agent.reply_mode = task.reply_mode
 
         return await agent.process(task.message, images=task.images, files=task.files)
@@ -1085,8 +1262,17 @@ class AgentManager:
         由定时调度器周期性调用，每次使用独立的会话避免上下文干扰。
         """
         try:
+            active_jobs = filter_active_jobs(
+                await load_jobs_metadata([str(agent_runtime_manager.jobs_dir)])
+            )
+            # 先在本地判断是否存在活跃任务。没有任务时直接短路，避免一次完整
+            # 的后台 Agent/LLM 空调用。
+            if not active_jobs:
+                logger.info("智能体心跳唤醒：没有活跃任务，跳过模型调用")
+                return
+
             # 每次使用唯一的 session_id，避免共享上下文
-            session_id = f"__agent_heartbeat_{uuid.uuid4().hex[:12]}__"
+            session_id = f"{HEARTBEAT_SESSION_PREFIX}{uuid.uuid4().hex[:12]}__"
             user_id = SYSTEM_INTERNAL_USER_ID
 
             logger.info("智能体心跳唤醒：开始检查待处理任务...")

@@ -12,7 +12,7 @@ from app.schemas.message import (
     ChannelCapabilityManager,
     ChannelCapability,
 )
-from app.schemas.types import MessageChannel
+from app.schemas.types import MessageChannel, NotificationType
 
 
 class _StreamChain(ChainBase):
@@ -61,6 +61,8 @@ class StreamingHandler:
         self._source: Optional[str] = None
         self._user_id: Optional[str] = None
         self._username: Optional[str] = None
+        self._original_message_id: Optional[str] = None
+        self._original_chat_id: Optional[str] = None
         self._title: str = ""
         self._allow_dispatch_without_context = False
         # 非啰嗦模式下的待输出工具统计，等下一段文本到来时再统一补一句摘要
@@ -147,6 +149,8 @@ class StreamingHandler:
         source: Optional[str] = None,
         user_id: Optional[str] = None,
         username: Optional[str] = None,
+        original_message_id: Optional[str] = None,
+        original_chat_id: Optional[str] = None,
         title: str = "",
     ):
         """
@@ -158,11 +162,15 @@ class StreamingHandler:
         :param user_id: 用户ID
         :param username: 用户名
         :param title: 消息标题
+        :param original_message_id: 原始消息ID（如果是回复消息）
+        :param original_chat_id: 原始聊天ID（如果是回复消息）
         """
         self._channel = channel
         self._source = source
         self._user_id = user_id
         self._username = username
+        self._original_message_id = original_message_id
+        self._original_chat_id = original_chat_id
         self._title = title
 
         self._streaming_enabled = True
@@ -210,6 +218,13 @@ class StreamingHandler:
 
         # 执行最后一次刷新
         await self._flush()
+
+        message_response = self._message_response
+        if message_response:
+            await run_in_threadpool(
+                _StreamChain().finalize_message,
+                message_response,
+            )
 
         # 检查是否所有缓冲内容都已发送
         with self._lock:
@@ -422,15 +437,23 @@ class StreamingHandler:
 
     async def _cancel_flush_task(self):
         """
-        取消当前的定时刷新任务
+        停止当前的定时刷新任务。
+
+        停止流式输出时，刷新任务可能已经在线程池里发出了首条消息。
+        这里先等待该轮刷新自然完成，确保 message_id 等返回信息能落回本地状态；
+        否则最终刷新会误以为尚未发送过消息，从而再次发送一条新消息。
         """
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
+        current_task = asyncio.current_task()
+        if (
+            self._flush_task
+            and not self._flush_task.done()
+            and self._flush_task is not current_task
+        ):
             try:
                 await self._flush_task
             except asyncio.CancelledError:
                 pass
-            self._flush_task = None
+        self._flush_task = None
 
     async def _flush(self):
         """
@@ -462,8 +485,11 @@ class StreamingHandler:
                     Notification(
                         channel=self._channel,
                         source=self._source,
+                        mtype=NotificationType.Agent,
                         userid=self._user_id,
                         username=self._username,
+                        original_message_id=self._original_message_id,
+                        original_chat_id=self._original_chat_id,
                         title=self._title,
                         text=current_text,
                     ),
@@ -504,8 +530,11 @@ class StreamingHandler:
                             Notification(
                                 channel=self._channel,
                                 source=self._source,
+                                mtype=NotificationType.Agent,
                                 userid=self._user_id,
                                 username=self._username,
+                                original_message_id=self._original_message_id,
+                                original_chat_id=self._original_chat_id,
                                 title=self._title,
                                 text=current_text,
                             ),
@@ -535,6 +564,7 @@ class StreamingHandler:
                         chat_id=self._message_response.chat_id,
                         text=current_text,
                         title=self._title,
+                        metadata=self._message_response.metadata,
                     )
                     if success:
                         with self._lock:

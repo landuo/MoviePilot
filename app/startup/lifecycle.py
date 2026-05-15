@@ -14,6 +14,7 @@ from app.startup.routers_initializer import init_routers
 from app.startup.scheduler_initializer import stop_scheduler, init_scheduler, init_plugin_scheduler
 from app.startup.workflow_initializer import init_workflow, stop_workflow
 from app.utils.worker_client import WorkerClientManager
+from app.utils.http import aclose_shared_async_transports
 
 
 async def init_extra():
@@ -88,3 +89,5 @@ async def lifespan(app: FastAPI):
         WorkerClientManager().stop()
         # 停止模块
         await stop_modules()
+        # 关闭共享的异步 HTTP 连接池，释放底层连接资源
+        await aclose_shared_async_transports()
