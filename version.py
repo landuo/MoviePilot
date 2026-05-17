@@ -1,4 +1,4 @@
-APP_VERSION = 'v2.12.0'
+APP_VERSION = 'v2.12.1'
 FRONTEND_VERSION = 'v2.12.0'
 
 # Worker 二进制版本，对应 release tag（默认仓库 landuo/MoviePilot，

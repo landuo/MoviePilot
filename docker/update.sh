@@ -50,6 +50,71 @@ function download_and_unzip() {
     fi
 }
 
+# 确保 Worker 二进制存在并尽量更新到新版 WORKERS_VERSION
+function ensure_worker_binaries() {
+    local backup_dir="$1"
+    local worker_repo="${WORKERS_REPO:-landuo/MoviePilot}"
+    local workers_version=""
+    local arch=""
+    local worker_platform=""
+    local name=""
+    local bin=""
+    local backup_bin=""
+    local download_tmp=""
+    local url=""
+
+    mkdir -p /app/bin
+
+    for name in mp-watcher mp-transfer mp-indexer; do
+        bin="/app/bin/${name}"
+        backup_bin="${backup_dir}/${name}"
+        if [ -x "${backup_bin}" ]; then
+            cp -f "${backup_bin}" "${bin}"
+            chmod +x "${bin}"
+            INFO "→ 已恢复 Worker 二进制：${name}"
+        fi
+    done
+
+    if [ -f /app/version.py ]; then
+        workers_version=$(sed -n "s/^WORKERS_VERSION[[:space:]]*=[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" /app/version.py | head -n 1)
+    fi
+    if [ -z "${workers_version}" ]; then
+        WARN "→ WORKERS_VERSION 未设置，跳过下载 Worker 二进制"
+        return 0
+    fi
+
+    arch=$(uname -m)
+    case "${arch}" in
+        x86_64)  worker_platform="linux-amd64" ;;
+        aarch64) worker_platform="linux-arm64" ;;
+        armv7l)  worker_platform="linux-armv7" ;;
+        *)       worker_platform="" ;;
+    esac
+    if [ -z "${worker_platform}" ]; then
+        WARN "→ 不支持的架构 ${arch}，跳过下载 Worker 二进制"
+        return 0
+    fi
+
+    for name in mp-watcher mp-transfer mp-indexer; do
+        bin="/app/bin/${name}"
+        download_tmp="/tmp/${name}.${worker_platform}.download"
+        url="${GITHUB_PROXY}https://github.com/${worker_repo}/releases/download/${workers_version}/${name}-${worker_platform}"
+        INFO "→ 正在下载 Worker 二进制：${name} (${worker_platform})"
+        if curl -f ${CURL_OPTIONS} "${url}" ${CURL_HEADERS} -o "${download_tmp}"; then
+            mv -f "${download_tmp}" "${bin}"
+            chmod +x "${bin}"
+            INFO "→ Worker 二进制下载成功：${name}"
+        else
+            rm -f "${download_tmp}"
+            if [ -x "${bin}" ]; then
+                WARN "→ Worker 二进制下载失败：${name}，继续使用已恢复的旧版本"
+            else
+                WARN "→ Worker 二进制下载失败：${name}，Python 端将走 fallback"
+            fi
+        fi
+    done
+}
+
 # 下载程序资源，$1: 后端版本路径
 function install_backend_and_download_resources() {
     # 更新后端程序
@@ -133,11 +198,18 @@ function install_backend_and_download_resources() {
     mkdir /resources_bakcup
     cp -a /app/app/helper/user.sites.v2.bin /resources_bakcup
     cp -a /app/app/helper/sites.cp* /resources_bakcup
+    # 备份 Worker 二进制
+    INFO "→ 正在备份 Worker 二进制..."
+    rm -rf /worker_binaries_backup
+    mkdir -p /worker_binaries_backup
+    cp -a /app/bin/mp-* /worker_binaries_backup/ 2>/dev/null || true
     # 清空程序目录
     rm -rf /app
     mkdir -p /app
     # 复制新后端程序
     cp -a ${TMP_PATH}/App/* /app/
+    # 恢复或下载 Worker 二进制
+    ensure_worker_binaries /worker_binaries_backup
     # 复制新前端程序
     rm -rf /public
     mkdir -p /public
