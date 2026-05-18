@@ -349,6 +349,8 @@ class ConfigModel(BaseModel):
     # 取代旧版 1-10 秒随机 sleep。设为 0 表示不限流
     # 默认 2 秒：兼顾用户体验（多关键字总耗时低）和站点风控（足以避免高频）
     SEARCH_KEYWORD_MIN_INTERVAL: float = 2.0
+    # 搜索资源获取页数
+    SEARCH_RESOURCE_PAGES: int = 1
 
     # ==================== 下载配置 ====================
     # 种子标签

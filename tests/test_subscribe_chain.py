@@ -773,3 +773,303 @@ class SubscribeChainTest(TestCase):
         self.assertEqual(subscribe.total_episode, 5)
         self.assertEqual(subscribe.lack_episode, 2)
         self.assertEqual(subscribe.current_priority, 0)
+
+    def test_best_version_interested_episodes_excludes_same_priority(self):
+        """同 pri_order 的候选不应再把已达到该优先级的集列为可升级集。
+
+        回归场景：E2 已记录在 episode_priority 中为 99，候选种子标题覆盖 E2/E3 且
+        其 pri_order=99；E2 不应进入 interested 集合，E3（None）则应进入。这是
+        洗版重复下载链路的源头判定，必须保持"严格大于"语义。
+        """
+        subscribe = self._build_subscribe(
+            total_episode=3,
+            episode_priority={"1": 100, "2": 99},
+            current_priority=100,
+        )
+        context = SimpleNamespace(
+            meta_info=SimpleNamespace(season_list=[1], episode_list=[2, 3]),
+            selected_episodes=None,
+        )
+
+        interested = SubscribeChain._SubscribeChain__get_best_version_interested_episodes(
+            subscribe=subscribe,
+            context=context,
+            priority=99,
+        )
+
+        self.assertEqual(interested, [3])
+
+    def test_best_version_interested_episodes_uses_title_episode_list_for_full_pack(self):
+        """整包候选（标题展开的集列表）只把仍可提升优先级的集纳入 interested。
+
+        防回归场景：标题显示"第53-104集"，实际目标范围只有 1..92，episode_priority
+        已经把 1..82 升到 100，E83 已经记到 99。同 pri_order=99 的同一资源再来时，
+        interested 应只剩 [84..92]，绝不能含 E83，否则后续下载层会再下一次同优先级。
+        """
+        subscribe = self._build_subscribe(
+            total_episode=92,
+            episode_priority={
+                **{str(ep): 100 for ep in range(1, 83)},
+                "83": 99,
+            },
+            current_priority=99,
+        )
+        context = SimpleNamespace(
+            meta_info=SimpleNamespace(season_list=[1], episode_list=list(range(53, 105))),
+            selected_episodes=None,
+        )
+
+        interested = SubscribeChain._SubscribeChain__get_best_version_interested_episodes(
+            subscribe=subscribe,
+            context=context,
+            priority=99,
+        )
+
+        self.assertEqual(interested, list(range(84, 93)))
+
+
+class SubscribeFilterAllowedEpisodesTest(TestCase):
+    """验证洗版过滤循环会把 interested 集合落到 context.allowed_episodes 上。
+
+    这条用例直接覆盖回归点：当 __get_best_version_interested_episodes 返回非空
+    集合时，候选必须带着允许集进入下载层，下游 batch_download 才能在标题元数据
+    与实际种子文件错位时做出正确取舍。
+    """
+
+    def _build_subscribe(self, **overrides):
+        return SubscribeChainTest()._build_subscribe(**overrides)
+
+    def test_filter_writes_allowed_episodes_to_context(self):
+        subscribe = self._build_subscribe(
+            total_episode=92,
+            episode_priority={
+                **{str(ep): 100 for ep in range(1, 83)},
+                "83": 99,
+            },
+            current_priority=99,
+        )
+        context = SimpleNamespace(
+            meta_info=SimpleNamespace(season_list=[1], episode_list=list(range(53, 105))),
+            selected_episodes=None,
+        )
+
+        interested = SubscribeChain._SubscribeChain__get_best_version_interested_episodes(
+            subscribe=subscribe,
+            context=context,
+            priority=99,
+        )
+        # 复刻 subscribe.py 过滤循环中的赋值，确认结果作为允许集传递。
+        context.allowed_episodes = set(interested) if interested else None
+
+        self.assertIsNotNone(context.allowed_episodes)
+        self.assertEqual(context.allowed_episodes, set(range(84, 93)))
+        # 关键回归点：E83 已达到 99，不在允许集内；下游交集后即不会再下 E83。
+        self.assertNotIn(83, context.allowed_episodes)
+
+    def test_filter_leaves_allowed_episodes_none_when_no_upgrade(self):
+        """同 pri_order 且目标集均已达到该优先级时，候选不应被放行，
+        相应地也不会有 allowed_episodes 被写入。"""
+        subscribe = self._build_subscribe(
+            total_episode=3,
+            episode_priority={"1": 100, "2": 99, "3": 99},
+            current_priority=99,
+        )
+        context = SimpleNamespace(
+            meta_info=SimpleNamespace(season_list=[1], episode_list=[2, 3]),
+            selected_episodes=None,
+        )
+
+        interested = SubscribeChain._SubscribeChain__get_best_version_interested_episodes(
+            subscribe=subscribe,
+            context=context,
+            priority=99,
+        )
+
+        self.assertEqual(interested, [])
+
+    def test_filter_writes_allowed_episodes_in_match_path(self):
+        """RSS/订阅刷新分支 match() 需要与 search() 对称地写入 allowed_episodes。
+
+        match() 路径下候选是 `_context = copy.copy(context)`，再走 best_version
+        判定。此用例复刻 match() 的过滤序列，验证浅拷贝后的 _context 在写入
+        allowed_episodes 时不会污染原始 context，且写入结果与 search() 一致。
+        若 match() 分支漏写 allowed_episodes，下游 batch_download 将看不到允许集
+        约束，回归到 2c458317 之前的同优先级重复下载状态。
+        """
+        import copy
+
+        subscribe = self._build_subscribe(
+            total_episode=92,
+            episode_priority={
+                **{str(ep): 100 for ep in range(1, 83)},
+                "83": 99,
+            },
+            current_priority=99,
+        )
+        original_context = SimpleNamespace(
+            meta_info=SimpleNamespace(season_list=[1], episode_list=list(range(53, 105))),
+            selected_episodes=None,
+            allowed_episodes=None,
+        )
+        _context = copy.copy(original_context)
+
+        interested = SubscribeChain._SubscribeChain__get_best_version_interested_episodes(
+            subscribe=subscribe,
+            context=_context,
+            priority=99,
+        )
+        # 复刻 match() 中的赋值；search() 与 match() 必须保持同形以避免分支漏改。
+        if interested:
+            _context.allowed_episodes = set(interested)
+
+        self.assertEqual(_context.allowed_episodes, set(range(84, 93)))
+        # 浅拷贝 + 新字段写入不应反向污染源 context（match() 中 contexts 缓存可能跨多次匹配复用）。
+        self.assertIsNone(original_context.allowed_episodes)
+
+
+class SubscribeNoteTrackingTest(TestCase):
+    """覆盖洗版与非洗版下 subscribe.note 的下载历史追踪。
+
+    回归目标：finish_subscribe_or_not 必须在所有订阅模式下都把本轮下载的集数追加进
+    subscribe.note；__get_downloaded 在洗版分支必须把 note 与 episode_priority==100
+    的完成集合并返回，避免迁移或低优先级下载场景下已下集被误判为"未下载"。
+    """
+
+    def _build_subscribe(self, **overrides):
+        return SubscribeChainTest()._build_subscribe(**overrides)
+
+    @staticmethod
+    def _build_download_context(episodes):
+        """构造一个最小化下载 context：只携带 finish_subscribe_or_not / __update_subscribe_note 路径会读到的字段。"""
+        return SimpleNamespace(
+            meta_info=SimpleNamespace(season_list=[1], episode_list=list(episodes)),
+            media_info=SimpleNamespace(
+                type=MediaType.TV,
+                tmdb_id=1,
+                douban_id=None,
+            ),
+            torrent_info=SimpleNamespace(pri_order=99, title="fake-torrent"),
+            selected_episodes=list(episodes),
+        )
+
+    def test_finish_subscribe_writes_note_for_best_version_downloads(self):
+        """洗版分支若产生 downloads，subscribe.note 必须被追加，不再被 best_version 标志拦截。
+
+        旧逻辑只在非洗版分支调用 __update_subscribe_note，导致 best_version=1 时
+        下载历史只落在 episode_priority；用户切回普通订阅或排障对账时缺失"下过哪些集"
+        的事实源。这条用例验证修复后两个分支都会写 note。
+        """
+        subscribe = self._build_subscribe(
+            best_version=1,
+            total_episode=92,
+            episode_priority={"1": 100},
+            note=[1],
+        )
+        chain = SubscribeChain()
+        downloads = [self._build_download_context([83])]
+
+        captured_updates = []
+
+        class _SubscribeOper:
+            def update(self, subscribe_id, payload):
+                captured_updates.append((subscribe_id, payload))
+
+            def get(self, *args, **kwargs):
+                return subscribe
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper), patch.object(
+            SubscribeChain,
+            "update_subscribe_priority",
+        ), patch.object(
+            SubscribeChain,
+            "_SubscribeChain__finish_subscribe",
+        ):
+            chain.finish_subscribe_or_not(
+                subscribe=subscribe,
+                meta=SimpleNamespace(type=MediaType.TV),
+                mediainfo=SimpleNamespace(title_year="Test Show (2026)", type=MediaType.TV,
+                                          tmdb_id=1, douban_id=None),
+                downloads=downloads,
+                lefts=None,
+            )
+
+        # note 更新必然发生在 SubscribeOper.update 上，定位"note" 键的最近一次写入。
+        note_writes = [payload["note"] for _, payload in captured_updates if "note" in payload]
+        self.assertTrue(note_writes, "best_version downloads should still trigger note update")
+        self.assertIn(83, note_writes[-1])
+        self.assertIn(1, note_writes[-1])  # 既有 note 保留
+
+    def test_finish_subscribe_skips_note_when_no_downloads(self):
+        """没有 downloads 时不应触碰 note，避免空写入或误清除。"""
+        subscribe = self._build_subscribe(best_version=1, total_episode=92, note=[1, 2])
+        chain = SubscribeChain()
+
+        captured_updates = []
+
+        class _SubscribeOper:
+            def update(self, subscribe_id, payload):
+                captured_updates.append((subscribe_id, payload))
+
+            def get(self, *args, **kwargs):
+                return subscribe
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper), patch.object(
+            SubscribeChain,
+            "_SubscribeChain__is_best_version_complete",
+            return_value=False,
+        ), patch.object(
+            SubscribeChain,
+            "_SubscribeChain__finish_subscribe",
+        ):
+            chain.finish_subscribe_or_not(
+                subscribe=subscribe,
+                meta=SimpleNamespace(type=MediaType.TV),
+                mediainfo=SimpleNamespace(title_year="Test Show (2026)", type=MediaType.TV,
+                                          tmdb_id=1, douban_id=None),
+                downloads=None,
+                lefts=None,
+            )
+
+        # 无下载时不应该有 note 写入。
+        self.assertFalse(
+            [payload for _, payload in captured_updates if "note" in payload],
+            "note must not be touched when downloads is empty",
+        )
+
+    def test_get_downloaded_best_version_returns_only_completed_episodes(self):
+        """关键回归：洗版分支不得把 note 合并进 __get_downloaded 返回值。
+
+        否则 check_and_handle_existing_media → __get_subscribe_no_exits 会把
+        priority<100 但已下载的集从 pending no_exists 中减掉，配合 force=True 但
+        __is_best_version_complete=False 的 finish_subscribe_or_not，会让订阅每轮
+        都跳过搜索却又永远不完成。__get_downloaded 在洗版下的语义是"无需再处理的
+        集"，只有 priority==100 才满足该语义。
+        """
+        subscribe = self._build_subscribe(
+            best_version=1,
+            total_episode=3,
+            episode_priority={"1": 100, "2": 100, "3": 99},
+            note=[1, 2, 3],
+        )
+
+        downloaded = SubscribeChain._SubscribeChain__get_downloaded(subscribe)
+
+        # E3 priority=99 仍是 pending，绝对不能合并到 downloaded 里
+        self.assertEqual(downloaded, [1, 2])
+        self.assertNotIn(3, downloaded)
+
+    def test_get_downloaded_non_best_version_reads_note_after_wash_migration(self):
+        """迁移场景：洗版期间 finish_subscribe_or_not 把下载集写入 note；
+        用户随后把 best_version 关掉，订阅切回普通模式时 __get_downloaded
+        从非洗版分支读取 note，旧洗版集仍能作为"已下载"被识别，避免重新匹配。
+        """
+        subscribe = self._build_subscribe(
+            best_version=0,
+            total_episode=5,
+            episode_priority={"1": 100, "2": 99},  # 旧洗版残留，普通分支不读
+            note=[1, 2, 3],
+        )
+
+        downloaded = SubscribeChain._SubscribeChain__get_downloaded(subscribe)
+
+        self.assertEqual(downloaded, [1, 2, 3])

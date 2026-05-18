@@ -38,7 +38,7 @@ if __name__ == '__main__':
     suite.addTest(unittest.TestLoader().loadTestsFromTestCase(TestMediaScrapeEvents))
 
     # 测试订阅洗版匹配
-    suite.addTest(SubscribeChainTest('test_is_episode_range_covered'))
+    suite.addTest(SubscribeChainTest('test_is_episode_range_covered_matches_pending_episodes'))
 
     # 测试 Worker 子进程相关功能
     loader = unittest.TestLoader()
