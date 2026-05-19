@@ -198,6 +198,8 @@ class SystemConfigKey(Enum):
     Customization = "Customization"
     # 自定义识别词
     CustomIdentifiers = "CustomIdentifiers"
+    # 集数定位规则词表
+    EpisodeFormatRuleTable = "EpisodeFormatRuleTable"
     # 转移屏蔽词
     TransferExcludeWords = "TransferExcludeWords"
     # 种子优先级规则
@@ -444,3 +446,5 @@ class ScrapingMetadata(NameValueEnum):
     BANNER = "横幅图"
     THUMB = "缩略图"
     DISC = "光盘图"
+    CLEARART = "透明艺术图"
+    LANDSCAPE = "横版缩略图"

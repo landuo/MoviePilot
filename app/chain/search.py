@@ -4,7 +4,7 @@ import json
 import random
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
 from typing import AsyncIterator, Any, Dict, Tuple
 from typing import List, Optional
@@ -73,6 +73,14 @@ class SearchChain(ChainBase):
             start_page = 0
         start_page = max(start_page, 0)
         return list(range(start_page, start_page + cls._get_search_resource_pages()))
+
+    def _should_continue_search_pages(self, site: dict, page_results: Optional[List[Any]],
+                                      keyword: Optional[str] = None) -> bool:
+        """
+        判断是否继续抓取下一页；少于站点单页容量时视为当前站点已到末页。
+        """
+        page_size = self.get_search_page_size(site=site, keyword=keyword)
+        return page_size is not None and len(page_results or []) >= page_size
 
     @property
     def is_ai_recommend_enabled(self) -> bool:
@@ -1293,61 +1301,103 @@ class SearchChain(ChainBase):
                         text=f"开始搜索，共 {len(indexer_sites)} 个站点，{len(search_pages)} 页 ...")
         # 结果集
         results = []
-
         # 实际搜索关键词（imdbid 模式下使用 imdb_id）
         actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
         actual_mtype = mediainfo.type if mediainfo else None
 
-        # 优先尝试批量调用：mp-indexer 可用时每页一次 IPC 拿回所有通用站点的 HTML
-        # IndexerModule.batch_search_torrents 内部已处理 worker 不可用的 fallback
+        # 优先尝试 worker 批量调用，同时按站点顺序翻页；短页后停止该站点后续页请求。
         try:
-            for search_page in search_pages:
+            active_sites = list(indexer_sites)
+            for page_index, search_page in enumerate(search_pages):
+                if global_vars.is_system_stopped or not active_sites:
+                    break
                 logger.info(
-                    f"[search-chain] 调用 batch_search_torrents：{len(indexer_sites)} 个站点 / "
+                    f"[search-chain] 调用 batch_search_torrents：{len(active_sites)} 个站点 / "
                     f"页码={search_page} / 关键词={actual_keyword!r} / 类型={actual_mtype}"
                 )
                 site_results = self.run_module(
                     "batch_search_torrents",
-                    sites=indexer_sites,
+                    sites=active_sites,
                     keyword=actual_keyword,
                     mtype=actual_mtype,
                     page=search_page,
                 )
                 if not isinstance(site_results, dict):
                     raise AttributeError("batch_search_torrents 未返回站点结果")
-                # 按 indexer_sites 顺序汇总，兼容批量返回和多页搜索。
-                for site in indexer_sites:
+                next_sites = []
+                for site in active_sites:
                     if global_vars.is_system_stopped:
                         break
                     finish_count += 1
                     result = site_results.get(site.get("id")) or []
                     if result:
                         results.extend(result)
+                    if (
+                        self._should_continue_search_pages(
+                            site=site, page_results=result, keyword=actual_keyword
+                        )
+                        and page_index + 1 < len(search_pages)
+                    ):
+                        next_sites.append(site)
+                    else:
+                        logger.debug(
+                            f"{site.get('name')} 第 {search_page} 页返回 {len(result or [])} 条，停止继续翻页"
+                        )
                     logger.info(f"站点搜索进度：{finish_count} / {total_num}")
                     progress.update(value=finish_count / total_num * 100,
                                     text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ...")
+                active_sites = next_sites
         except AttributeError:
-            # 无批量入口时保留多线程旧路径，并按多页请求数限制并发。
+            # 无批量入口时保留多线程旧路径，同一站点按页顺序抓取。
             results = []
             finish_count = 0
-            max_workers = min(total_num, settings.CONF.threadpool or total_num)
+            max_workers = min(len(indexer_sites), settings.CONF.threadpool or len(indexer_sites))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                all_task = [
-                    executor.submit(self.search_torrents, site=site,
-                                    keyword=actual_keyword, mtype=actual_mtype, page=search_page)
-                    for site in indexer_sites
-                    for search_page in search_pages
-                ]
-                for future in as_completed(all_task):
-                    if global_vars.is_system_stopped:
-                        break
-                    finish_count += 1
-                    result = future.result()
-                    if result:
-                        results.extend(result)
-                    logger.info(f"站点搜索进度：{finish_count} / {total_num}")
-                    progress.update(value=finish_count / total_num * 100,
-                                    text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ...")
+                pending_tasks = {}
+
+                def submit_site_page(site: dict, page_index: int):
+                    """
+                    提交单个站点页搜索任务，并记录该任务对应的站点和页码位置。
+                    """
+                    search_page = search_pages[page_index]
+                    search_keyword = actual_keyword
+                    task = executor.submit(self.search_torrents, site=site,
+                                           keyword=search_keyword,
+                                           mtype=actual_mtype,
+                                           page=search_page)
+                    pending_tasks[task] = (site, page_index, search_page, search_keyword)
+
+                for site in indexer_sites:
+                    submit_site_page(site=site, page_index=0)
+
+                try:
+                    while pending_tasks:
+                        if global_vars.is_system_stopped:
+                            break
+                        done_tasks, _ = wait(pending_tasks, return_when=FIRST_COMPLETED)
+                        for future in done_tasks:
+                            site, page_index, search_page, search_keyword = pending_tasks.pop(future)
+                            finish_count += 1
+                            result = future.result()
+                            if result:
+                                results.extend(result)
+                            if (
+                                self._should_continue_search_pages(
+                                    site=site, page_results=result, keyword=search_keyword
+                                )
+                                and page_index + 1 < len(search_pages)
+                            ):
+                                submit_site_page(site=site, page_index=page_index + 1)
+                            else:
+                                logger.debug(
+                                    f"{site.get('name')} 第 {search_page} 页返回 {len(result or [])} 条，停止继续翻页"
+                                )
+                            logger.info(f"站点搜索进度：{finish_count} / {total_num}")
+                            progress.update(value=finish_count / total_num * 100,
+                                            text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ...")
+                finally:
+                    for task in pending_tasks:
+                        task.cancel()
         # 计算耗时
         end_time = datetime.now()
         # 更新进度
@@ -1408,36 +1458,50 @@ class SearchChain(ChainBase):
         actual_keyword = (mediainfo.imdb_id if mediainfo else None) if area == "imdbid" else keyword
         actual_mtype = mediainfo.type if mediainfo else None
 
-        # 优先尝试批量调用：mp-indexer 可用时每页一次 IPC 拿回所有通用站点的 HTML
-        # IndexerModule.async_batch_search_torrents 内部已处理 worker 不可用的 fallback
+        # 优先尝试 worker 批量调用，同时按站点顺序翻页；短页后停止该站点后续页请求。
         try:
-            for search_page in search_pages:
+            active_sites = list(indexer_sites)
+            for page_index, search_page in enumerate(search_pages):
+                if global_vars.is_system_stopped or not active_sites:
+                    break
                 logger.info(
-                    f"[search-chain-async] 调用 async_batch_search_torrents：{len(indexer_sites)} 个站点 / "
+                    f"[search-chain-async] 调用 async_batch_search_torrents：{len(active_sites)} 个站点 / "
                     f"页码={search_page} / 关键词={actual_keyword!r} / 类型={actual_mtype}"
                 )
                 site_results = await self.async_run_module(
                     "async_batch_search_torrents",
-                    sites=indexer_sites,
+                    sites=active_sites,
                     keyword=actual_keyword,
                     mtype=actual_mtype,
                     page=search_page,
                 )
                 if not isinstance(site_results, dict):
                     raise AttributeError("async_batch_search_torrents 未返回站点结果")
-                # 按 indexer_sites 顺序汇总，兼容批量返回和多页搜索。
-                for site in indexer_sites:
+                next_sites = []
+                for site in active_sites:
                     if global_vars.is_system_stopped:
                         break
                     finish_count += 1
                     result = site_results.get(site.get("id")) or []
                     if result:
                         results.extend(result)
+                    if (
+                        self._should_continue_search_pages(
+                            site=site, page_results=result, keyword=actual_keyword
+                        )
+                        and page_index + 1 < len(search_pages)
+                    ):
+                        next_sites.append(site)
+                    else:
+                        logger.debug(
+                            f"{site.get('name')} 第 {search_page} 页返回 {len(result or [])} 条，停止继续翻页"
+                        )
                     logger.info(f"站点搜索进度：{finish_count} / {total_num}")
                     progress.update(value=finish_count / total_num * 100,
                                     text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ...")
+                active_sites = next_sites
         except AttributeError:
-            # 无批量入口时保留旧路径，并限制多页并发请求数。
+            # 无批量入口时保留旧路径，同一站点按页顺序抓取。
             results = []
             finish_count = 0
             semaphore = asyncio.Semaphore(settings.CONF.threadpool or total_num)
@@ -1452,21 +1516,54 @@ class SearchChain(ChainBase):
                                                             mtype=actual_mtype,
                                                             page=search_page)
 
-            tasks = [
-                search_site_page(site, search_page)
-                for site in indexer_sites
-                for search_page in search_pages
-            ]
-            for future in asyncio.as_completed(tasks):
-                if global_vars.is_system_stopped:
-                    break
-                finish_count += 1
-                result = await future
-                if result:
-                    results.extend(result)
-                logger.info(f"站点搜索进度：{finish_count} / {total_num}")
-                progress.update(value=finish_count / total_num * 100,
-                                text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ...")
+            pending_tasks = {}
+
+            def submit_site_page(site: dict, page_index: int):
+                """
+                提交异步站点页搜索任务，并记录该任务对应的站点和页码位置。
+                """
+                search_page = search_pages[page_index]
+                search_keyword = actual_keyword
+                task = asyncio.create_task(search_site_page(site=site, search_page=search_page))
+                pending_tasks[task] = (site, page_index, search_page, search_keyword)
+
+            for site in indexer_sites:
+                submit_site_page(site=site, page_index=0)
+
+            try:
+                while pending_tasks:
+                    if global_vars.is_system_stopped:
+                        break
+                    done_tasks, _ = await asyncio.wait(
+                        pending_tasks.keys(),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for future in done_tasks:
+                        site, page_index, search_page, search_keyword = pending_tasks.pop(future)
+                        finish_count += 1
+                        result = await future
+                        if result:
+                            results.extend(result)
+                        if (
+                            self._should_continue_search_pages(
+                                site=site, page_results=result, keyword=search_keyword
+                            )
+                            and page_index + 1 < len(search_pages)
+                        ):
+                            submit_site_page(site=site, page_index=page_index + 1)
+                        else:
+                            logger.debug(
+                                f"{site.get('name')} 第 {search_page} 页返回 {len(result or [])} 条，停止继续翻页"
+                            )
+                        logger.info(f"站点搜索进度：{finish_count} / {total_num}")
+                        progress.update(value=finish_count / total_num * 100,
+                                        text=f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ...")
+            finally:
+                for task in pending_tasks:
+                    if not task.done():
+                        task.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks.keys(), return_exceptions=True)
 
         # 计算耗时
         end_time = datetime.now()
@@ -1543,8 +1640,9 @@ class SearchChain(ChainBase):
         fallback_path_count = 0
         semaphore = asyncio.Semaphore(settings.CONF.threadpool or total_num)
 
-        async def search_site_via_worker(site: dict, search_page: int) -> Tuple[dict, int, List[TorrentInfo]]:
+        async def search_site_via_worker(site: dict, search_page: int) -> List[TorrentInfo]:
             """流式批量化路径：单站点单页通过 async_worker_search_site 真异步执行"""
+            nonlocal fallback_path_count
             async with semaphore:
                 try:
                     result = await self.async_worker_search_site(
@@ -1553,18 +1651,19 @@ class SearchChain(ChainBase):
                         mtype=actual_mtype,
                         page=search_page,
                     )
-                    return site, search_page, result or []
+                    return result or []
                 except Exception as err:  # noqa: BLE001
                     logger.warn(f"[stream-batch] 站点 {site.get('name')} 页码 {search_page} 异常，回退原路径：{err}")
+                    fallback_path_count += 1
                     result = await self.async_search_torrents(
                         site=site,
                         keyword=actual_keyword,
                         mtype=actual_mtype,
                         page=search_page,
                     )
-                    return site, search_page, result or []
+                    return result or []
 
-        async def search_site_legacy(site: dict, search_page: int) -> Tuple[dict, int, List[TorrentInfo]]:
+        async def search_site_legacy(site: dict, search_page: int) -> List[TorrentInfo]:
             """Legacy 路径：保留原 async_search_torrents 行为"""
             async with semaphore:
                 result = await self.async_search_torrents(
@@ -1573,66 +1672,94 @@ class SearchChain(ChainBase):
                     mtype=actual_mtype,
                     page=search_page,
                 )
-                return site, search_page, result or []
+                return result or []
 
         if use_stream_batch:
             logger.info(
-                f"[stream-batch] 启用流式批量化：{total_num} 个请求 / "
+                f"[stream-batch] 启用流式批量化：最多 {total_num} 个请求 / "
                 f"关键词={actual_keyword!r} / 类型={actual_mtype}"
             )
-            worker_path_count = total_num
-            tasks = [
-                asyncio.create_task(search_site_via_worker(site, search_page))
-                for site in indexer_sites
-                for search_page in search_pages
-            ]
         else:
             logger.info(
-                f"[stream-batch] 未启用（self 非 IndexerModule），使用 legacy 路径：{total_num} 个请求"
+                f"[stream-batch] 未启用（self 非 IndexerModule），使用 legacy 路径：最多 {total_num} 个请求"
             )
-            fallback_path_count = total_num
-            tasks = [
-                asyncio.create_task(search_site_legacy(site, search_page))
-                for site in indexer_sites
-                for search_page in search_pages
-            ]
+
+        tasks = {}
+
+        def submit_site_page(site: dict, page_index: int):
+            """
+            提交渐进式站点页搜索任务，并保留站点和页码上下文。
+            """
+            nonlocal worker_path_count, fallback_path_count
+            search_page = search_pages[page_index]
+            search_keyword = actual_keyword
+            if use_stream_batch:
+                worker_path_count += 1
+                task = asyncio.create_task(search_site_via_worker(site=site, search_page=search_page))
+            else:
+                fallback_path_count += 1
+                task = asyncio.create_task(search_site_legacy(site=site, search_page=search_page))
+            tasks[task] = (site, page_index, search_page, search_keyword)
+
+        for site in indexer_sites:
+            submit_site_page(site=site, page_index=0)
+
         results_count = 0
         first_byte_logged = False
         try:
-            for future in asyncio.as_completed(tasks):
+            while tasks:
                 if global_vars.is_system_stopped:
                     break
-                finish_count += 1
-                site, search_page, result = await future
-                results_count += len(result)
-                if not first_byte_logged:
-                    first_byte_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                    logger.info(
-                        f"[stream-batch] 首站点完成 {site.get('name')} | "
-                        f"耗时 {first_byte_ms}ms | 资源数 {len(result)}"
-                    )
-                    first_byte_logged = True
-                logger.info(f"站点搜索进度：{finish_count} / {total_num}")
-                progress_value = finish_count / total_num * 100
-                progress_text = f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ..."
-                progress.update(value=progress_value, text=progress_text)
-                yield {
-                    "type": "append",
-                    "stage": "searching",
-                    "value": progress_value,
-                    "text": progress_text,
-                    "items": result,
-                    "site": site.get("name"),
-                    "site_id": site.get("id"),
-                    "page": search_page,
-                    "finished": finish_count,
-                    "total": total_num,
-                    "total_items": results_count
-                }
+                done_tasks, _ = await asyncio.wait(
+                    tasks.keys(),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for future in done_tasks:
+                    site, page_index, search_page, search_keyword = tasks.pop(future)
+                    finish_count += 1
+                    result = await future
+                    results_count += len(result)
+                    if (
+                        self._should_continue_search_pages(
+                            site=site, page_results=result, keyword=search_keyword
+                        )
+                        and page_index + 1 < len(search_pages)
+                    ):
+                        submit_site_page(site=site, page_index=page_index + 1)
+                    else:
+                        logger.debug(
+                            f"{site.get('name')} 第 {search_page} 页返回 {len(result)} 条，停止继续翻页"
+                        )
+                    if not first_byte_logged:
+                        first_byte_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                        logger.info(
+                            f"[stream-batch] 首站点完成 {site.get('name')} | "
+                            f"耗时 {first_byte_ms}ms | 资源数 {len(result)}"
+                        )
+                        first_byte_logged = True
+                    logger.info(f"站点搜索进度：{finish_count} / {total_num}")
+                    progress_value = finish_count / total_num * 100
+                    progress_text = f"正在搜索{keyword or ''}，已完成 {finish_count} / {total_num} 个请求 ..."
+                    progress.update(value=progress_value, text=progress_text)
+                    yield {
+                        "type": "append",
+                        "stage": "searching",
+                        "value": progress_value,
+                        "text": progress_text,
+                        "items": result,
+                        "site": site.get("name"),
+                        "site_id": site.get("id"),
+                        "page": search_page,
+                        "finished": finish_count,
+                        "total": total_num,
+                        "total_items": results_count
+                    }
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks.keys(), return_exceptions=True)
 
         end_time = datetime.now()
         elapsed = (end_time - start_time).seconds
