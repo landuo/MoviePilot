@@ -355,7 +355,7 @@ function graceful_exit() {
 # 插件依赖和主程序共用同一套 venv 时，历史安装记录可能已经污染环境，
 # 这里优先在真正拉起后端前做一次自愈，避免容器反复起不来。
 function ensure_backend_runtime_dependencies() {
-    local probe_code="import alembic, cloakbrowser, fastapi, pydantic, pydantic_core, pydantic_settings, python_multipart, sqlalchemy, uvicorn; from pydantic import BaseModel, Field; from starlette.requests import Request"
+    local probe_code="import alembic, cloakbrowser, fastapi, pydantic, pydantic_core, pydantic_settings, sqlalchemy, starlette, uvicorn; from pydantic import BaseModel, Field"
 
     INFO "→ 启动前检查后端核心依赖..."
     if "${VENV_PATH}/bin/python3" -c "${probe_code}" >/dev/null 2>&1; then
@@ -458,10 +458,8 @@ chown -R moviepilot:moviepilot \
     /app \
     /public \
     "${CONFIG_DIR}" \
-    "${VENV_PATH}" \
     /var/lib/nginx \
     /var/log/nginx
-chmod -R u+rwX,go+rX "${VENV_PATH}"
 chown moviepilot:moviepilot /etc/hosts /tmp
 
 # 启动前优先确认主运行环境仍然健康，避免插件依赖污染导致服务直接起不来。
