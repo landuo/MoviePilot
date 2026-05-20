@@ -24,80 +24,29 @@ from app.utils.system import SystemUtils
 SYSTEM_TASKS_FILE = "System Tasks.yaml"
 SYSTEM_TASKS_SCHEMA_VERSION = 2
 COMMON_SHELL_COMMANDS = (
+    # 只探测会明显改变 Agent 执行策略的可选能力。基础命令、语言运行时、
+    # 包管理器、服务管理器和数据库客户端默认不做启动探测，减少 which 扫描量。
     "ssh",
     "scp",
     "sftp",
-    "rsync",
     "git",
     "gh",
     "rg",
     "fd",
-    "find",
-    "grep",
-    "sed",
-    "awk",
     "jq",
     "yq",
     "curl",
     "wget",
-    "tar",
-    "gzip",
-    "gunzip",
-    "zip",
-    "unzip",
-    "xz",
-    "7z",
     "docker",
     "docker-compose",
-    "kubectl",
-    "helm",
-    "sqlite3",
-    "psql",
-    "mysql",
-    "redis-cli",
     "python",
     "python3",
-    "pip",
-    "pip3",
-    "uv",
-    "node",
-    "npm",
-    "yarn",
-    "pnpm",
-    "bun",
     "ffmpeg",
     "ffprobe",
     "mediainfo",
     "rclone",
     "aria2c",
     "yt-dlp",
-    "openssl",
-    "base64",
-    "sha256sum",
-    "shasum",
-    "du",
-    "df",
-    "ps",
-    "top",
-    "lsof",
-    "netstat",
-    "ss",
-    "ping",
-    "traceroute",
-    "dig",
-    "nslookup",
-    "nc",
-    "telnet",
-    "crontab",
-    "systemctl",
-    "service",
-    "journalctl",
-    "launchctl",
-    "brew",
-    "apt",
-    "apk",
-    "yum",
-    "dnf",
 )
 
 
@@ -388,6 +337,12 @@ class PromptManager:
             info_lines.extend(
                 f"  - {command}: {path}" for command, path in available_commands
             )
+            # `rg` 同时覆盖文件枚举和文本检索，且比通用 shell 查找更适合
+            # Agent 的代码阅读与定位场景；只有在它不可用或不适合时才退回其他工具。
+            if any(command == "rg" for command, _ in available_commands):
+                info_lines.append(
+                    "- When searching files or text, prefer `rg` / `rg --files`. Only fall back to other search tools when `rg` is unavailable or unsuitable."
+                )
 
         return "\n".join(info_lines)
 
