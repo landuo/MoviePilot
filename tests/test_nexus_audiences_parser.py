@@ -149,7 +149,7 @@ def test_audiences_table_unread_links_ignore_content_rows():
     next_page = parser._parse_message_unread_links(html_text, msg_links)
 
     assert msg_links == ["messages.php?action=viewmessage&id=4318225"]
-    assert next_page is None
+    assert next_page == "messages.php?action=viewmailbox&box=1&unread=yes&page=1"
 
 
 def test_audiences_readpm_row_is_not_unread_message():
@@ -181,3 +181,61 @@ def test_audiences_readpm_row_is_not_unread_message():
     parser._parse_message_unread_links(html_text, msg_links)
 
     assert msg_links == []
+
+
+def test_audiences_unread_mailbox_only_uses_user_box():
+    """
+    Audiences 只使用用户消息箱，首页不传 page，page=1 实际表示第二页。
+    """
+    parser = NexusAudiencesSiteUserInfo(
+        site_name="Audiences",
+        url="https://audiences.me/",
+        site_cookie="",
+        apikey=None,
+        token=None,
+    )
+
+    assert parser._user_mail_unread_page == "messages.php?action=viewmailbox&box=1&unread=yes"
+    assert parser._sys_mail_unread_page is None
+
+
+def test_audiences_unread_links_increment_page_until_empty():
+    """
+    Audiences 每页固定 10 条，有未读行时按 page 参数自增继续翻页。
+    """
+    parser = NexusAudiencesSiteUserInfo(
+        site_name="Audiences",
+        url="https://audiences.me/",
+        site_cookie="",
+        apikey=None,
+        token=None,
+    )
+    html_text = """
+    <html>
+      <body>
+        <table>
+          <tr>
+            <td class="rowfollow" align="center">
+              <img class="unreadpm" src="pic/trans.gif" alt="Unread" title="未读">
+            </td>
+            <td class="rowfollow" align="left">
+              <a href="messages.php?action=viewmessage&amp;id=4318225">种子被删除</a>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+    msg_links = []
+
+    next_page = parser._parse_message_unread_links(html_text, msg_links)
+    next_next_page = parser._parse_message_unread_links(html_text, msg_links)
+    stop_page = parser._parse_message_unread_links("<html><body><table></table></body></html>", msg_links)
+
+    assert msg_links == [
+        "messages.php?action=viewmessage&id=4318225",
+        "messages.php?action=viewmessage&id=4318225",
+    ]
+    assert next_page == "messages.php?action=viewmailbox&box=1&unread=yes&page=1"
+    assert next_next_page == "messages.php?action=viewmailbox&box=1&unread=yes&page=2"
+    assert stop_page is None

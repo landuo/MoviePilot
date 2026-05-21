@@ -26,8 +26,7 @@ from app.db.models.transferhistory import TransferHistory
 from app.db.systemconfig_oper import SystemConfigOper
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.directory import DirectoryHelper
-from app.helper.episode_format import EpisodeFormatRuleHelper
-from app.helper.format import FormatParser
+from app.helper.format import EpisodeFormatRuleHelper, FormatParser
 from app.helper.progress import ProgressHelper
 from app.log import logger
 from app.schemas import StorageOperSelectionEventData
@@ -871,9 +870,6 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         """
         整理完成后处理
         """
-        if transferinfo:
-            transferinfo.ensure_target_items()
-
         # 状态
         ret_status = True
         # 错误信息
@@ -1162,7 +1158,6 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         """
         if not transferinfo:
             return None
-        transferinfo.ensure_target_items()
         if transferinfo.target_diritem and transferinfo.target_diritem.path:
             return transferinfo.target_diritem.path
         if transferinfo.target_item and transferinfo.target_item.path:
@@ -1170,30 +1165,6 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         if transferinfo.file_list_new:
             return Path(transferinfo.file_list_new[0]).parent.as_posix()
         return None
-
-    def __build_transfer_target_diritem(
-            self, transferinfo: Optional[TransferInfo]
-    ) -> Optional[FileItem]:
-        """
-        构建整理目标目录项，避免成功结果缺少 target_diritem 时阻断后续流程。
-        """
-        if not transferinfo:
-            return None
-        transferinfo.ensure_target_items()
-        if transferinfo.target_diritem:
-            return transferinfo.target_diritem
-        target_dir_path = self.__get_transfer_target_dir_path(transferinfo)
-        if not target_dir_path:
-            return None
-        target_path = Path(target_dir_path)
-        storage = transferinfo.target_item.storage if transferinfo.target_item else "local"
-        return FileItem(
-            storage=storage,
-            path=target_dir_path,
-            type="dir",
-            name=target_path.name,
-            basename=target_path.stem,
-        )
 
     def put_to_queue(self, task: TransferTask) -> bool:
         """
@@ -1248,7 +1219,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         ):
             return
 
-        target_diritem = self.__build_transfer_target_diritem(transferinfo)
+        target_diritem = transferinfo.target_diritem
         if not target_diritem:
             return
 
@@ -1311,7 +1282,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         ):
             return
 
-        target_diritem = self.__build_transfer_target_diritem(transferinfo)
+        target_diritem = transferinfo.target_diritem
         if not target_diritem:
             return
 
@@ -1823,14 +1794,22 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             self, directory: FileItem
     ) -> List[FileItem]:
         """
-        获取目录下可参与模板推荐的媒体文件
+        获取目录下可参与模板推荐的样本文件。
+
+        推荐结果最终会在手动整理链路中作为 `episode_format`
+        交由 `FormatParser` 过滤主视频、字幕和外挂音频，因此这里需要把
+        同目录下的主视频、字幕和外挂音频一起纳入推荐流程。
         """
         file_items = StorageChain().list_files(directory, recursion=False) or []
         sample_files: List[FileItem] = []
         for item in file_items:
             if not item or item.type != "file":
                 continue
-            if not self.__is_media_file(item):
+            if not (
+                    self.__is_media_file(item)
+                    or self.__is_subtitle_file(item)
+                    or self.__is_audio_file(item)
+            ):
                 continue
             if self.__is_hidden_or_recycle_path(item.path):
                 continue

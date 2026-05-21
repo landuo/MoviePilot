@@ -13,6 +13,15 @@ from app.utils.string import StringUtils
 class NexusAudiencesSiteUserInfo(NexusPhpSiteUserInfo):
     schema = SiteSchema.NexusAudiences
 
+    def __init__(self, *args, **kwargs):
+        """
+        初始化 Audiences 未读私信列表地址，第一页不能携带 page 参数。
+        """
+        super().__init__(*args, **kwargs)
+        self._user_mail_unread_page = self.__build_unread_mailbox_page(box=1)
+        self._sys_mail_unread_page = None
+        self.__next_mail_page = 1
+
     def _parse_message_unread(self, html_text):
         """
         解析 Audiences 新版顶部用户栏中的未读消息数。
@@ -55,15 +64,30 @@ class NexusAudiencesSiteUserInfo(NexusPhpSiteUserInfo):
                 'or @alt="Unread" or @title="未读"]]/td/a[contains(@href, "viewmessage")]/@href'
             )
             msg_links.extend(message_links)
-            next_page = None
-            next_page_text = html.xpath('//a[contains(.//text(), "下一页") or contains(.//text(), "下一頁")]/@href')
-            if next_page_text:
-                next_page = next_page_text[-1].strip()
+            next_page = self.__build_next_unread_mailbox_page(bool(message_links))
         finally:
             if html is not None:
                 del html
 
         return next_page
+
+    @classmethod
+    def __build_unread_mailbox_page(cls, box: int) -> str:
+        """
+        构造 Audiences 未读私信列表首页地址。
+        """
+        return f"messages.php?action=viewmailbox&box={box}&unread=yes"
+
+    def __build_next_unread_mailbox_page(self, has_unread: bool) -> str:
+        """
+        当前页存在未读消息时按 Audiences 的 page 参数规则生成下一页地址。
+        """
+        if not has_unread:
+            return None
+
+        next_page = self.__next_mail_page
+        self.__next_mail_page += 1
+        return f"{self._user_mail_unread_page}&page={next_page}"
 
     def _parse_user_traffic_info(self, html_text):
         """

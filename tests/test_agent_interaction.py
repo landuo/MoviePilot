@@ -93,6 +93,40 @@ class TestAgentInteraction(unittest.TestCase):
         _, option = resolved
         self.assertEqual(option.value, "继续下载")
 
+    def test_choice_tool_blocks_after_feedback_quality_rejection(self):
+        tool = AskUserChoiceTool(session_id="session-feedback", user_id="10001")
+        tool.set_message_attr(
+            channel=MessageChannel.Telegram.value,
+            source="telegram-test",
+            username="tester",
+        )
+        tool.set_agent_context(
+            agent_context={"feedback_issue_rejected_quality": True}
+        )
+
+        with patch(
+            "app.agent.tools.impl.ask_user_choice.ToolChain.async_post_message",
+            new=AsyncMock(),
+        ) as async_post_message:
+            result = asyncio.run(
+                tool.run(
+                    message="测试ISSUE提交被系统质量校验拦截，请选择：",
+                    options=[
+                        UserChoiceOptionInput(
+                            label="提供真实问题描述重新提交",
+                            value="提供真实问题描述重新提交",
+                        ),
+                        UserChoiceOptionInput(
+                            label="取消测试，了解原因",
+                            value="取消测试，了解原因",
+                        ),
+                    ],
+                )
+            )
+
+        self.assertIn("质量门槛拒绝", result)
+        async_post_message.assert_not_awaited()
+
     def test_agent_interaction_callback_routes_selected_value_back_to_agent(self):
         chain = MessageChain()
         request = agent_interaction_manager.create_request(

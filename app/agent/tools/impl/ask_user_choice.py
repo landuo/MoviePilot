@@ -89,6 +89,15 @@ class AskUserChoiceTool(MoviePilotTool):
             return text[:max_length]
         return text[: max_length - 3] + "..."
 
+    def _blocked_by_feedback_quality_gate(self) -> bool:
+        """反馈 Issue 质量门槛拒绝后，禁止继续发按钮引导改写。
+
+        这是对 ``feedback-issue`` skill 的历史兜底：如果同一轮上下文已经
+        标记反馈内容被质量门槛拒绝，就不能再用按钮诱导用户把测试 / 占位
+        内容改写成“真实问题”。
+        """
+        return bool(self._agent_context.get("feedback_issue_rejected_quality"))
+
     async def run(
         self,
         message: str,
@@ -96,6 +105,17 @@ class AskUserChoiceTool(MoviePilotTool):
         title: Optional[str] = None,
         **kwargs,
     ) -> str:
+        if self._blocked_by_feedback_quality_gate():
+            logger.warning(
+                "ask_user_choice blocked after feedback issue rejected_quality: "
+                "session_id=%s",
+                self._session_id,
+            )
+            return (
+                "反馈 Issue 已被质量门槛拒绝，不能继续发送按钮引导用户改写或重新提交。"
+                "请直接结束本次反馈流程。"
+            )
+
         if not self._channel or not self._source:
             return "当前不在可回传消息的会话中，无法发起按钮选择"
 
