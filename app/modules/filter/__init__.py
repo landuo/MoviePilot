@@ -4,7 +4,7 @@ from functools import lru_cache
 from typing import List, Tuple, Union, Dict, Optional
 
 from app.core.context import TorrentInfo, MediaInfo
-from app.core.metainfo import MetaInfo
+from app.core.metainfo import clear_rust_parse_options_cache, _rust_parse_options
 from app.helper.rule import RuleHelper
 from app.log import logger
 from app.modules import _ModuleBase
@@ -12,7 +12,6 @@ from app.modules.filter.RuleParser import RuleParser
 from app.modules.filter.builtin_rules import BUILTIN_RULE_SET
 from app.schemas.types import ModuleType, OtherModulesType, SystemConfigKey
 from app.utils import rust_accel
-from app.utils.string import StringUtils
 
 
 _SIZE_UNIT = 1024 * 1024
@@ -61,7 +60,12 @@ def _parse_publish_time(publish_time: str) -> Tuple[float, ...]:
 
 
 class FilterModule(_ModuleBase):
-    CONFIG_WATCH = {SystemConfigKey.CustomFilterRules.value}
+    CONFIG_WATCH = {
+        SystemConfigKey.CustomFilterRules.value,
+        SystemConfigKey.CustomIdentifiers.value,
+        SystemConfigKey.CustomReleaseGroups.value,
+        SystemConfigKey.Customization.value,
+    }
 
     # 保留一份只读内置规则定义，方便查询工具准确区分“内置规则”和“自定义规则”。
     builtin_rule_set: Dict[str, dict] = deepcopy(BUILTIN_RULE_SET)
@@ -76,6 +80,13 @@ class FilterModule(_ModuleBase):
         # 每次重载都先恢复为纯内置规则，避免旧的自定义规则残留在内存里。
         self.rule_set = deepcopy(self.builtin_rule_set)
         self.__init_custom_rules()
+
+    def on_config_changed(self):
+        """
+        自定义过滤或 Meta 识别配置变更后重建规则集并刷新 Rust Meta 配置缓存。
+        """
+        clear_rust_parse_options_cache()
+        self.init_module()
 
     def __init_custom_rules(self):
         """
@@ -132,67 +143,67 @@ class FilterModule(_ModuleBase):
         """
         if not rule_groups:
             return torrent_list
-        parser = RuleParser()
-        # 同一轮过滤里，相同的优先级层级会被多个种子反复使用；按需解析并缓存，
-        # 既减少 pyparsing 开销，也保留原来“命中高优先级后不解析低层级”的容错行为。
-        parsed_rule_cache: Dict[str, Union[list, str]] = {}
         # 查询规则表详情
         groups = self.rulehelper.get_rule_group_by_media(media=mediainfo, group_names=rule_groups)
         if groups:
-            rust_filtered = self.__filter_torrents_by_rust(groups, torrent_list, mediainfo)
-            if rust_filtered is not None:
-                return rust_filtered
-            for group in groups:
-                # 过滤种子
-                torrent_list = self.__filter_torrents(
-                    rule_string=group.rule_string,
-                    rule_name=group.name,
+            group_defs = [group.model_dump() if hasattr(group, "model_dump") else vars(group) for group in groups]
+            matched_orders = rust_accel.filter_torrents(
+                groups=group_defs,
+                torrent_list=torrent_list,
+                rule_set=self.rule_set,
+                mediainfo=mediainfo,
+                metainfo_options=_rust_parse_options() if self.__needs_metainfo_options(group_defs) else None,
+            )
+            if matched_orders is None:
+                return self.__filter_torrents_with_python(
+                    groups=group_defs,
                     torrent_list=torrent_list,
-                    mediainfo=mediainfo,
-                    parser=parser,
-                    parsed_rule_cache=parsed_rule_cache,
+                    mediainfo=mediainfo
                 )
+            ret_torrents = []
+            for index, pri_order in matched_orders:
+                torrent = torrent_list[index]
+                torrent.pri_order = pri_order
+                ret_torrents.append(torrent)
+            return ret_torrents
         return torrent_list
 
-    def __filter_torrents_by_rust(self, groups: list, torrent_list: List[TorrentInfo],
-                                  mediainfo: MediaInfo) -> Optional[List[TorrentInfo]]:
+    def __filter_torrents_with_python(self, groups: List[dict],
+                                      torrent_list: List[TorrentInfo],
+                                      mediainfo: MediaInfo = None) -> List[TorrentInfo]:
         """
-        使用 Rust 批量过滤种子；遇到不可支持的规则时返回 None 交由 Python 逻辑处理。
+        使用 Python 旧路径过滤种子，供 Rust 加速关闭或不可用时兜底。
         """
-        if not torrent_list:
-            return []
-        payloads = [self.__build_rust_torrent_payload(torrent) for torrent in torrent_list]
-        media_payload = mediainfo.to_dict() if mediainfo and hasattr(mediainfo, "to_dict") else (
-            vars(mediainfo).copy() if mediainfo else None
-        )
-        result = rust_accel.filter_torrents(
-            rule_set=self.rule_set,
-            rule_strings=[group.rule_string for group in groups],
-            torrents=payloads,
-            media_info=media_payload,
-        )
-        if result is None:
-            return None
-        filtered_torrents = []
-        for index, pri_order in result:
-            torrent = torrent_list[int(index)]
-            torrent.pri_order = int(pri_order)
-            filtered_torrents.append(torrent)
-        return filtered_torrents
+        ret_torrents = torrent_list
+        parser = RuleParser()
+        parsed_rule_cache = {}
+        for group in groups:
+            rule_string = group.get("rule_string")
+            if not rule_string:
+                continue
+            ret_torrents = self.__filter_torrents(
+                rule_string=rule_string,
+                rule_name=group.get("name") or rule_string,
+                torrent_list=ret_torrents,
+                mediainfo=mediainfo,
+                parser=parser,
+                parsed_rule_cache=parsed_rule_cache,
+            )
+            if not ret_torrents:
+                break
+        return ret_torrents
 
-    @staticmethod
-    def __build_rust_torrent_payload(torrent: TorrentInfo) -> dict:
+    def __needs_metainfo_options(self, groups: List[dict]) -> bool:
         """
-        组装 Rust 过滤器需要的纯数据载荷，避免 Rust 直接依赖 Python 业务对象。
+        判断当前规则链是否会触发 size_range，避免无大小规则时读取 MetaInfo 运行配置。
         """
-        payload = torrent.to_dict() if hasattr(torrent, "to_dict") else vars(torrent).copy()
-        payload["pub_minutes"] = torrent.pub_minutes()
-        if payload.get("size"):
-            meta = MetaInfo(title=torrent.title, subtitle=torrent.description)
-            payload["episode_count"] = meta.total_episode or 1
-        else:
-            payload["episode_count"] = 1
-        return payload
+        rule_ids = set()
+        for group in groups:
+            rule_string = group.get("rule_string")
+            if not rule_string:
+                continue
+            rule_ids.update(re.findall(r"[A-Za-z][A-Za-z0-9]*|[0-9]+[A-Za-z][A-Za-z0-9]*", rule_string))
+        return any(self.rule_set.get(rule_id, {}).get("size_range") for rule_id in rule_ids)
 
     def __filter_torrents(self, rule_string: str, rule_name: str,
                           torrent_list: List[TorrentInfo],

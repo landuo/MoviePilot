@@ -96,19 +96,6 @@ class SiteSpider:
         """
         获取搜索URL
         """
-        rust_url = rust_accel.build_indexer_search_url({
-            "search": self.search,
-            "batch": self.batch,
-            "browse": self.browse,
-            "category": self.category,
-            "domain": self.domain,
-            "keyword": self.keyword,
-            "mtype": self.mtype.value if self.mtype else None,
-            "cat": self.cat,
-            "page": self.page,
-        })
-        if rust_url:
-            return rust_url
         # 种子搜索相对路径
         paths = self.search.get('paths', [])
         torrentspath = ""
@@ -672,9 +659,6 @@ class SiteSpider:
         """
         if not text or not filters or not isinstance(filters, list):
             return text
-        rust_text = rust_accel.apply_indexer_text_filters(text, filters)
-        if rust_text is not None:
-            return rust_text
         if not isinstance(text, str):
             text = str(text)
         for filter_item in filters:
@@ -754,18 +738,19 @@ class SiteSpider:
             self.is_error = True
             return []
 
-        # 清空旧结果
-        self.torrents_info_array = []
         rust_torrents = rust_accel.parse_indexer_torrents(
             html_text=html_text,
             domain=self.domain,
             list_config=self.list,
             fields=self.fields,
             category=self.category,
-            result_num=int(self.result_num),
+            result_num=self.result_num
         )
         if rust_torrents is not None:
             return rust_torrents
+
+        # 清空旧结果
+        self.torrents_info_array = []
         html_doc = None
         try:
             # 解析站点文本对象

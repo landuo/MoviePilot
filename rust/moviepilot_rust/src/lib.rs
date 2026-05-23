@@ -1,6 +1,7 @@
 mod filter;
 mod indexer;
-mod meta;
+mod metainfo;
+mod rss;
 mod utils;
 
 use pyo3::prelude::*;
@@ -15,17 +16,12 @@ fn is_available() -> bool {
 #[pymodule]
 fn moviepilot_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_available, m)?)?;
-    m.add_function(wrap_pyfunction!(meta::is_anime_fast, m)?)?;
-    m.add_function(wrap_pyfunction!(meta::find_metainfo_fast, m)?)?;
-    m.add_function(wrap_pyfunction!(meta::parse_video_title_fast, m)?)?;
     m.add_function(wrap_pyfunction!(filter::parse_filter_rule_fast, m)?)?;
     m.add_function(wrap_pyfunction!(filter::filter_torrents_fast, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        indexer::apply_indexer_text_filters_fast,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(indexer::parse_filesize_fast, m)?)?;
-    m.add_function(wrap_pyfunction!(indexer::build_indexer_search_url_fast, m)?)?;
     m.add_function(wrap_pyfunction!(indexer::parse_indexer_torrents_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(metainfo::parse_metainfo_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(metainfo::parse_metainfo_path_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(metainfo::find_metainfo_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(rss::parse_rss_items_fast, m)?)?;
     Ok(())
 }

@@ -11,7 +11,23 @@ from app.schemas.types import MediaType
 from app.utils.string import StringUtils
 from app.utils.tokens import Tokens
 from app.core.meta.streamingplatform import StreamingPlatforms
-from app.utils import rust_accel
+
+
+SEASON_FULL_RE = re.compile(r"^(?:Season\s+|S)(\d{1,3})$", re.IGNORECASE)
+FIRST_BRACKET_RE = re.compile(r'^[\[【](.+?)[\]】]')
+BRACKET_DOT_TITLE_RE = re.compile(r'[A-Za-z]+\..+(?:19|20)\d{2}')
+BRACKET_RESOURCE_RE = re.compile(
+    r'(?:2160|1080|720|480)[PIpi]|4K|UHD|Blu[\-.]?ray|REMUX|WEB[\-.]?DL|HDTV',
+    re.IGNORECASE,
+)
+YEAR_RANGE_RE = re.compile(r'([\s.]+)(\d{4})-(\d{4})')
+FILE_SIZE_RE = re.compile(r'[0-9.]+\s*[MGT]i?B(?![A-Z]+)', re.IGNORECASE)
+DATE_RE = re.compile(r'\d{4}[\s._-]\d{1,2}[\s._-]\d{1,2}')
+DIY_RE = re.compile(r'DIY', re.IGNORECASE)
+DIY_TITLE_RE = re.compile(r'-DIY@', re.IGNORECASE)
+DESCRIPTION_SPLIT_RE = re.compile(r'[\s/|]+')
+SPACE_RE = re.compile(r'\s+')
+SEASON_SUFFIX_RE = re.compile(r"SEASON$", re.IGNORECASE)
 
 
 class MetaVideo(MetaBase):
@@ -55,6 +71,21 @@ class MetaVideo(MetaBase):
     _video_encode_re = r"^(H26[45])$|^(x26[45])$|^AVC$|^HEVC$|^VC\d?$|^MPEG\d?$|^Xvid$|^DivX$|^AV1$|^HDR\d*$|^AVS(\+|[23])$"
     _audio_encode_re = r"^DTS\d?$|^DTSHD$|^DTSHDMA$|^Atmos$|^TrueHD\d?$|^AC3$|^\dAudios?$|^DDP\d?$|^DD\+\d?$|^DD\d?$|^LPCM\d?$|^AAC\d?$|^FLAC\d?$|^HD\d?$|^MA\d?$|^HR\d?$|^Opus\d?$|^Vorbis\d?$|^AV[3S]A$"
     _fps_re = r"(\d{2,3})(?=FPS)"
+    _season_pattern = re.compile(_season_re, re.IGNORECASE)
+    _episode_pattern = re.compile(_episode_re, re.IGNORECASE)
+    _part_pattern = re.compile(_part_re, re.IGNORECASE)
+    _roman_numerals_pattern = re.compile(_roman_numerals)
+    _source_pattern = re.compile(r"(%s)" % _source_re, re.IGNORECASE)
+    _effect_pattern = re.compile(r"(%s)" % _effect_re, re.IGNORECASE)
+    _resources_type_pattern = re.compile(r"(%s)" % _resources_type_re, re.IGNORECASE)
+    _name_no_chinese_pattern = re.compile(_name_no_chinese_re, re.IGNORECASE)
+    _name_movie_words_pattern = re.compile("|".join(_name_movie_words), re.IGNORECASE)
+    _name_nostring_pattern = re.compile(_name_nostring_re, re.IGNORECASE)
+    _resources_pix_pattern = re.compile(_resources_pix_re, re.IGNORECASE)
+    _resources_pix_pattern2 = re.compile(_resources_pix_re2, re.IGNORECASE)
+    _video_encode_pattern = re.compile(r"(%s)" % _video_encode_re, re.IGNORECASE)
+    _audio_encode_pattern = re.compile(r"(%s)" % _audio_encode_re, re.IGNORECASE)
+    _fps_pattern = re.compile(r"(%s)" % _fps_re, re.IGNORECASE)
 
     def __init__(self, title: str, subtitle: str = None, isfile: bool = False):
         """
@@ -78,7 +109,7 @@ class MetaVideo(MetaBase):
             self.type = MediaType.TV
             return
         # 全名为Season xx 及 Sxx 直接返回
-        season_full_res = re.search(r"^(?:Season\s+|S)(\d{1,3})$", title, re.IGNORECASE)
+        season_full_res = SEASON_FULL_RE.search(title)
         if season_full_res:
             self.type = MediaType.TV
             season = season_full_res.group(1)
@@ -87,81 +118,78 @@ class MetaVideo(MetaBase):
                 self.total_season = 1
             return
         # 去掉名称中第1个[]的内容
-        _first_bracket = re.match(r'^[\[【](.+?)[\]】]', title)
+        _first_bracket = FIRST_BRACKET_RE.match(title)
         if _first_bracket:
             _bracket_content = _first_bracket.group(1)
             # 如果第一个括号内为点分隔的英文发布名格式（含年份+资源类型），保留内容去掉括号
-            if re.search(r'[A-Za-z]+\..+(?:19|20)\d{2}', _bracket_content) \
-                    and re.search(r'(?:2160|1080|720|480)[PIpi]|4K|UHD|Blu[\-.]?ray|REMUX|WEB[\-.]?DL|HDTV',
-                                  _bracket_content, re.IGNORECASE):
+            if BRACKET_DOT_TITLE_RE.search(_bracket_content) \
+                    and BRACKET_RESOURCE_RE.search(_bracket_content):
                 title = _bracket_content + title[_first_bracket.end():]
             else:
                 title = title[_first_bracket.end():]
         # 把xxxx-xxxx年份换成前一个年份，常出现在季集上
-        title = re.sub(r'([\s.]+)(\d{4})-(\d{4})', r'\1\2', title)
+        title = YEAR_RANGE_RE.sub(r'\1\2', title)
         # 把大小去掉
-        title = re.sub(r'[0-9.]+\s*[MGT]i?B(?![A-Z]+)', "", title, flags=re.IGNORECASE)
+        title = FILE_SIZE_RE.sub("", title)
         # 把年月日去掉
-        title = re.sub(r'\d{4}[\s._-]\d{1,2}[\s._-]\d{1,2}', "", title)
+        title = DATE_RE.sub("", title)
         media_exts = settings.RMT_MEDIAEXT + settings.RMT_SUBEXT + settings.RMT_AUDIOEXT
-        rust_parse = rust_accel.parse_video_title(title, isfile=isfile, media_exts=media_exts)
-        if not self.__apply_rust_parse(rust_parse):
-            # 拆分tokens
-            tokens = Tokens(title)
-            # 实例化StreamingPlatforms对象
-            streaming_platforms = StreamingPlatforms()
-            # 解析名称、年份、季、集、资源类型、分辨率等
+        # 拆分tokens
+        tokens = Tokens(title)
+        # 实例化StreamingPlatforms对象
+        streaming_platforms = StreamingPlatforms()
+        # 解析名称、年份、季、集、资源类型、分辨率等
+        token = tokens.get_next()
+        while token:
+            self._index += 1  # 更新当前处理的token索引
+            # Part
+            self.__init_part(token, tokens)
+            # 标题
+            if self._continue_flag:
+                self.__init_name(token, media_exts)
+            # 年份
+            if self._continue_flag:
+                self.__init_year(token)
+            # 分辨率
+            if self._continue_flag:
+                self.__init_resource_pix(token)
+            # 季
+            if self._continue_flag:
+                self.__init_season(token)
+            # 集
+            if self._continue_flag:
+                self.__init_episode(token)
+            # 资源类型
+            if self._continue_flag:
+                self.__init_resource_type(token)
+            # 流媒体平台
+            if self._continue_flag:
+                self.__init_web_source(token, tokens, streaming_platforms)
+            # 视频编码
+            if self._continue_flag:
+                self.__init_video_encode(token)
+            # 视频位深
+            if self._continue_flag:
+                self.__init_video_bit(token)
+            # 音频编码
+            if self._continue_flag:
+                self.__init_audio_encode(token)
+            # 帧率
+            if self._continue_flag:
+                self.__init_fps(token)
+            # 取下一个，直到没有为卡
             token = tokens.get_next()
-            while token:
-                self._index += 1  # 更新当前处理的token索引
-                # Part
-                self.__init_part(token, tokens)
-                # 标题
-                if self._continue_flag:
-                    self.__init_name(token, media_exts)
-                # 年份
-                if self._continue_flag:
-                    self.__init_year(token)
-                # 分辨率
-                if self._continue_flag:
-                    self.__init_resource_pix(token)
-                # 季
-                if self._continue_flag:
-                    self.__init_season(token)
-                # 集
-                if self._continue_flag:
-                    self.__init_episode(token)
-                # 资源类型
-                if self._continue_flag:
-                    self.__init_resource_type(token)
-                # 流媒体平台
-                if self._continue_flag:
-                    self.__init_web_source(token, tokens, streaming_platforms)
-                # 视频编码
-                if self._continue_flag:
-                    self.__init_video_encode(token)
-                # 视频位深
-                if self._continue_flag:
-                    self.__init_video_bit(token)
-                # 音频编码
-                if self._continue_flag:
-                    self.__init_audio_encode(token)
-                # 帧率
-                if self._continue_flag:
-                    self.__init_fps(token)
-                # 取下一个，直到没有为卡
-                token = tokens.get_next()
-                self._continue_flag = True
-            # 合成质量
-            if self._effect:
-                self._effect.reverse()
-                self.resource_effect = " ".join(self._effect)
-            if self._source:
-                self.resource_type = self._source.strip()
+            self._continue_flag = True
+        # 合成质量
+        if self._effect:
+            self._effect.reverse()
+            self.resource_effect = " ".join(self._effect)
+        if self._source:
+            self.resource_type = self._source.strip()
         # 提取原盘DIY
         if self.resource_type and "BluRay" in self.resource_type:
-            if (self.subtitle and re.findall(r'D[Ii]Y', self.subtitle)) \
-                    or re.findall(r'-D[Ii]Y@', original_title):
+            if (self.subtitle and DIY_RE.search(self.subtitle)) \
+                    or DIY_TITLE_RE.search(original_title):
                 self.resource_type = f"{self.resource_type} DIY"
         # 解析副标题，只要季和集
         self.init_subtitle(self.org_string)
@@ -188,62 +216,6 @@ class MetaVideo(MetaBase):
         if not self.video_bit:
             self.video_bit = self.extract_video_bit(self.video_encode)
 
-    def __apply_rust_parse(self, rust_parse: Optional[dict]) -> bool:
-        """
-        应用 Rust 主识别结果；成功时跳过 Python token 主循环。
-        """
-        if not rust_parse or not rust_parse.get("complete"):
-            return False
-        self.cn_name = rust_parse.get("cn_name")
-        self.en_name = rust_parse.get("en_name")
-        if rust_parse.get("year"):
-            self.year = str(rust_parse.get("year"))
-        self.part = rust_parse.get("part")
-        self.__merge_rust_parse(rust_parse)
-        media_type = rust_parse.get("type")
-        if media_type == "tv":
-            self.type = MediaType.TV
-        elif media_type == "movie":
-            self.type = MediaType.MOVIE
-        return True
-
-    def __merge_rust_parse(self, rust_parse: Optional[dict]) -> None:
-        """
-        合并 Rust 预解析结果，仅补齐 Python 识别未命中的资源字段。
-        """
-        if not rust_parse:
-            return
-        if not self.year and rust_parse.get("year"):
-            self.year = str(rust_parse.get("year"))
-        if self.begin_season is None and rust_parse.get("begin_season") is not None:
-            self.begin_season = int(rust_parse.get("begin_season"))
-            self.type = MediaType.TV
-        if self.end_season is None and rust_parse.get("end_season") is not None:
-            self.end_season = int(rust_parse.get("end_season"))
-        if not self.total_season and rust_parse.get("total_season"):
-            self.total_season = int(rust_parse.get("total_season"))
-        if self.begin_episode is None and rust_parse.get("begin_episode") is not None:
-            self.begin_episode = int(rust_parse.get("begin_episode"))
-            self.type = MediaType.TV
-        if self.end_episode is None and rust_parse.get("end_episode") is not None:
-            self.end_episode = int(rust_parse.get("end_episode"))
-        if not self.total_episode and rust_parse.get("total_episode"):
-            self.total_episode = int(rust_parse.get("total_episode"))
-        if not self.resource_pix and rust_parse.get("resource_pix"):
-            self.resource_pix = rust_parse.get("resource_pix")
-        if not self.resource_type and rust_parse.get("resource_type"):
-            self.resource_type = rust_parse.get("resource_type")
-        if not self.resource_effect and rust_parse.get("resource_effect"):
-            self.resource_effect = rust_parse.get("resource_effect")
-        if not self.video_encode and rust_parse.get("video_encode"):
-            self.video_encode = rust_parse.get("video_encode")
-        if not self.video_bit and rust_parse.get("video_bit"):
-            self.video_bit = rust_parse.get("video_bit")
-        if not self.audio_encode and rust_parse.get("audio_encode"):
-            self.audio_encode = rust_parse.get("audio_encode")
-        if self.fps is None and rust_parse.get("fps") is not None:
-            self.fps = int(rust_parse.get("fps"))
-
     @staticmethod
     def __get_title_from_description(description: str) -> Optional[str]:
         """
@@ -251,7 +223,7 @@ class MetaVideo(MetaBase):
         """
         if not description:
             return None
-        titles = re.split(r'[\s/|]+', description)
+        titles = DESCRIPTION_SPLIT_RE.split(description)
         if StringUtils.is_chinese(titles[0]):
             return titles[0]
         return None
@@ -274,9 +246,8 @@ class MetaVideo(MetaBase):
         """
         if not name:
             return name
-        name = re.sub(r'%s' % self._name_nostring_re, '', name,
-                      flags=re.IGNORECASE).strip()
-        name = re.sub(r'\s+', ' ', name)
+        name = self._name_nostring_pattern.sub('', name).strip()
+        name = SPACE_RE.sub(' ', name)
         if name.isdecimal() \
                 and int(name) < 1800 \
                 and not self.year \
@@ -322,13 +293,13 @@ class MetaVideo(MetaBase):
             if not self.cn_name:
                 self.cn_name = token
             elif not self._stop_cnname_flag:
-                if re.search("|".join(self._name_movie_words), token, flags=re.IGNORECASE) \
-                        or (not re.search("%s" % self._name_no_chinese_re, token, flags=re.IGNORECASE)
+                if self._name_movie_words_pattern.search(token) \
+                        or (not self._name_no_chinese_pattern.search(token)
                             and not any(w in token for w in self._name_se_words)):
                     self.cn_name = "%s %s" % (self.cn_name, token)
                 self._stop_cnname_flag = True
         else:
-            is_roman_digit = re.search(self._roman_numerals, token)
+            is_roman_digit = self._roman_numerals_pattern.search(token)
             # 阿拉伯数字或者罗马数字
             if token.isdigit() or is_roman_digit:
                 # 第季集后面的不要
@@ -364,16 +335,16 @@ class MetaVideo(MetaBase):
                     # 名字未出现前的第一个数字，记下来
                     if not self._unknown_name_str:
                         self._unknown_name_str = token
-            elif re.search(r"%s" % self._season_re, token, re.IGNORECASE):
+            elif self._season_pattern.search(token):
                 # 季的处理
-                if self.en_name and re.search(r"SEASON$", self.en_name, re.IGNORECASE):
+                if self.en_name and SEASON_SUFFIX_RE.search(self.en_name):
                     # 如果匹配到季，英文名结尾为Season，说明Season属于标题，不应在后续作为干扰词去除
                     self.en_name += ' '
                 self._stop_name_flag = True
                 return
-            elif re.search(r"%s" % self._episode_re, token, re.IGNORECASE) \
-                    or re.search(r"(%s)" % self._resources_type_re, token, re.IGNORECASE) \
-                    or re.search(r"%s" % self._resources_pix_re, token, re.IGNORECASE):
+            elif self._episode_pattern.search(token) \
+                    or self._resources_type_pattern.search(token) \
+                    or self._resources_pix_pattern.search(token):
                 # 集、来源、版本等不要
                 self._stop_name_flag = True
                 return
@@ -400,7 +371,7 @@ class MetaVideo(MetaBase):
                 and not self.resource_pix \
                 and not self.resource_type:
             return
-        re_res = re.search(r"%s" % self._part_re, token, re.IGNORECASE)
+        re_res = self._part_pattern.search(token)
         if re_res:
             if not self.part:
                 self.part = re_res.group(1)
@@ -431,7 +402,7 @@ class MetaVideo(MetaBase):
                 self.en_name = "%s %s" % (self.en_name.strip(), self.year)
             elif self.cn_name:
                 self.cn_name = "%s %s" % (self.cn_name, self.year)
-        elif self.en_name and re.search(r"SEASON$", self.en_name, re.IGNORECASE):
+        elif self.en_name and SEASON_SUFFIX_RE.search(self.en_name):
             # 如果匹配到年，且英文名结尾为Season，说明Season属于标题，不应在后续作为干扰词去除
             self.en_name += ' '
         self.year = token
@@ -445,7 +416,7 @@ class MetaVideo(MetaBase):
         """
         if not self.name:
             return
-        re_res = re.findall(r"%s" % self._resources_pix_re, token, re.IGNORECASE)
+        re_res = self._resources_pix_pattern.findall(token)
         if re_res:
             self._last_token_type = "pix"
             self._continue_flag = False
@@ -470,7 +441,7 @@ class MetaVideo(MetaBase):
                     and self.resource_pix[-1] not in 'kpi':
                 self.resource_pix = "%sp" % self.resource_pix
         else:
-            re_res = re.search(r"%s" % self._resources_pix_re2, token, re.IGNORECASE)
+            re_res = self._resources_pix_pattern2.search(token)
             if re_res:
                 self._last_token_type = "pix"
                 self._continue_flag = False
@@ -482,7 +453,7 @@ class MetaVideo(MetaBase):
         """
         识别季
         """
-        re_res = re.findall(r"%s" % self._season_re, token, re.IGNORECASE)
+        re_res = self._season_pattern.findall(token)
         if re_res:
             self._last_token_type = "season"
             self.type = MediaType.TV
@@ -534,7 +505,7 @@ class MetaVideo(MetaBase):
         """
         识别集
         """
-        re_res = re.findall(r"%s" % self._episode_re, token, re.IGNORECASE)
+        re_res = self._episode_pattern.findall(token)
         if re_res:
             self._last_token_type = "episode"
             self._continue_flag = False
@@ -640,7 +611,7 @@ class MetaVideo(MetaBase):
             self._source = "UHD BluRay"
             self._continue_flag = False
             return
-        source_res = re.search(r"(%s)" % self._source_re, token, re.IGNORECASE)
+        source_res = self._source_pattern.search(token)
         if source_res:
             self._last_token_type = "source"
             self._continue_flag = False
@@ -649,7 +620,7 @@ class MetaVideo(MetaBase):
                 self._source = source_res.group(1)
                 self._last_token = self._source.upper()
             return
-        effect_res = re.search(r"(%s)" % self._effect_re, token, re.IGNORECASE)
+        effect_res = self._effect_pattern.search(token)
         if effect_res:
             self._last_token_type = "effect"
             self._continue_flag = False
@@ -722,7 +693,7 @@ class MetaVideo(MetaBase):
                 and not self.begin_season \
                 and not self.begin_episode:
             return
-        re_res = re.search(r"(%s)" % self._video_encode_re, token, re.IGNORECASE)
+        re_res = self._video_encode_pattern.search(token)
         if re_res:
             self._continue_flag = False
             self._stop_name_flag = True
@@ -791,7 +762,7 @@ class MetaVideo(MetaBase):
                 and not self.begin_season \
                 and not self.begin_episode:
             return
-        re_res = re.search(r"(%s)" % self._audio_encode_re, token, re.IGNORECASE)
+        re_res = self._audio_encode_pattern.search(token)
         if re_res:
             self._continue_flag = False
             self._stop_name_flag = True
@@ -822,7 +793,7 @@ class MetaVideo(MetaBase):
         if not self.name:
             return
 
-        re_res = re.search(rf"({self._fps_re})", token, re.IGNORECASE)
+        re_res = self._fps_pattern.search(token)
         if re_res:
             self._continue_flag = False
             self._stop_name_flag = True

@@ -1,9 +1,21 @@
-use crate::utils::{get_optional_f64, get_optional_i64, get_optional_string};
+use crate::metainfo::parse_total_episode_for_filter;
+use crate::utils::{
+    get_optional_f64, get_optional_i64, get_optional_nonempty_string, get_string_list,
+    object_optional_f64, object_optional_i64, object_optional_string, object_string_list,
+    py_any_to_string_list,
+};
+use chrono::{Local, NaiveDateTime};
+use fancy_regex::Regex as FancyRegex;
+use once_cell::sync::Lazy;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
-use regex::{Regex, RegexBuilder};
-use std::collections::HashMap;
+use pyo3::types::{PyAny, PyDict, PyList, PyString};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
+static REGEX_CACHE: Lazy<Mutex<HashMap<String, FancyRegex>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+const SIZE_UNIT: f64 = 1024.0 * 1024.0;
 
 #[derive(Clone, Debug)]
 enum RuleExpr {
@@ -23,24 +35,67 @@ enum Token {
     RParen,
 }
 
-#[derive(Clone, Debug)]
-struct TorrentPayload {
-    index: usize,
+#[derive(Clone)]
+struct FilterGroup {
+    levels: Vec<String>,
+}
+
+struct RuleMatcher {
+    rules: HashMap<String, PyObject>,
+    match_fields: HashSet<String>,
+}
+
+struct TorrentSnapshot {
     title: String,
     description: String,
     labels: Vec<String>,
+    fields: HashMap<String, Vec<String>>,
     size: f64,
     seeders: i64,
     downloadvolumefactor: Option<f64>,
     pub_minutes: f64,
-    episode_count: f64,
-    fields: HashMap<String, FieldValue>,
 }
 
-#[derive(Clone, Debug)]
-enum FieldValue {
-    Scalar(String),
-    List(Vec<String>),
+struct MediaSnapshot {
+    available: bool,
+    values: HashMap<String, Vec<String>>,
+}
+
+#[pyfunction]
+#[pyo3(signature = (groups, torrent_list, rule_set, mediainfo=None, metainfo_options=None))]
+pub(crate) fn filter_torrents_fast(
+    py: Python<'_>,
+    groups: &Bound<'_, PyList>,
+    torrent_list: &Bound<'_, PyList>,
+    rule_set: &Bound<'_, PyDict>,
+    mediainfo: Option<&Bound<'_, PyAny>>,
+    metainfo_options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let groups = parse_filter_groups(groups)?;
+    if groups.is_empty() {
+        return Ok(PyList::empty(py).into());
+    }
+    let matcher = RuleMatcher::from_py(rule_set)?;
+    let media = MediaSnapshot::from_py(mediainfo)?;
+    let results = PyList::empty(py);
+    let mut parsed_rule_cache: HashMap<String, RuleExpr> = HashMap::new();
+    let mut episode_count_cache: HashMap<String, i64> = HashMap::new();
+    for (index, torrent_obj) in torrent_list.iter().enumerate() {
+        let torrent = TorrentSnapshot::from_py(&torrent_obj, &matcher.match_fields)?;
+        if let Some(priority) = match_torrent(
+            py,
+            &torrent,
+            &groups,
+            &matcher,
+            &media,
+            metainfo_options,
+            &mut parsed_rule_cache,
+            &mut episode_count_cache,
+        )? {
+            results.append((index, priority))?;
+        }
+    }
+    Ok(results.into())
 }
 
 #[pyfunction]
@@ -54,85 +109,6 @@ pub(crate) fn parse_filter_rule_fast(py: Python<'_>, expression: &str) -> PyResu
     let outer = PyList::empty(py);
     outer.append(expr_to_py(py, &expr)?)?;
     Ok(outer.into())
-}
-
-/// 批量执行种子过滤规则，返回保留项的原始下标和优先级。
-#[pyfunction]
-#[pyo3(signature = (rule_set, rule_strings, torrents, media_info=None))]
-pub(crate) fn filter_torrents_fast(
-    py: Python<'_>,
-    rule_set: &Bound<'_, PyDict>,
-    rule_strings: Vec<String>,
-    torrents: &Bound<'_, PyList>,
-    media_info: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyObject> {
-    py.allow_threads(|| {});
-    let mut payloads = Vec::with_capacity(torrents.len());
-    for index in 0..torrents.len() {
-        let item = torrents.get_item(index)?;
-        let dict = item.downcast::<PyDict>()?;
-        payloads.push(TorrentPayload::from_py_dict(index, dict)?);
-    }
-
-    let mut expr_cache: HashMap<String, RuleExpr> = HashMap::new();
-    let mut regex_cache: HashMap<String, Regex> = HashMap::new();
-    let mut current_indices: Vec<usize> = (0..payloads.len()).collect();
-    let mut priorities: HashMap<usize, i64> = HashMap::new();
-
-    for rule_string in rule_strings {
-        if current_indices.is_empty() {
-            break;
-        }
-        let levels: Vec<String> = rule_string
-            .split('>')
-            .map(|level| level.trim().to_string())
-            .collect();
-        let mut retained = Vec::new();
-        for payload_index in &current_indices {
-            let payload = &payloads[*payload_index];
-            let mut res_order = 100_i64;
-            let mut matched = false;
-            for level in &levels {
-                let expr = if let Some(cached) = expr_cache.get(level) {
-                    cached.clone()
-                } else {
-                    let parsed = parse_rule_expression(level)?;
-                    expr_cache.insert(level.clone(), parsed.clone());
-                    parsed
-                };
-                if match_expr(&expr, payload, rule_set, media_info, &mut regex_cache)? {
-                    matched = true;
-                    priorities.insert(payload.index, res_order);
-                    break;
-                }
-                res_order -= 1;
-            }
-            if matched {
-                retained.push(*payload_index);
-            }
-        }
-        current_indices = retained;
-    }
-
-    let result = PyList::empty(py);
-    for payload_index in current_indices {
-        let payload = &payloads[payload_index];
-        result.append((
-            payload.index,
-            priorities.get(&payload.index).copied().unwrap_or(0),
-        ))?;
-    }
-    Ok(result.into())
-}
-
-fn parse_rule_expression(expression: &str) -> PyResult<RuleExpr> {
-    let tokens = tokenize_rule(expression)?;
-    let mut parser = RuleParserState::new(tokens);
-    let expr = parser.parse_expression()?;
-    if parser.has_remaining() {
-        return Err(PyValueError::new_err("规则表达式包含无法解析的剩余内容"));
-    }
-    Ok(expr)
 }
 
 /// 将规则字符串切分为名称、逻辑符和括号。
@@ -326,115 +302,308 @@ fn expr_binary_to_py(
     Ok(list.into())
 }
 
-impl TorrentPayload {
-    /// 从 Python 字典构造 Rust 过滤载荷。
-    fn from_py_dict(index: usize, dict: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let title = get_optional_string(dict, "title")?.unwrap_or_default();
-        let description = get_optional_string(dict, "description")?.unwrap_or_default();
-        let labels = get_string_list(dict, "labels")?;
-        let size = get_optional_f64(dict, "size")?.unwrap_or(0.0);
-        let seeders = get_optional_i64(dict, "seeders")?.unwrap_or(0);
-        let downloadvolumefactor = get_optional_f64(dict, "downloadvolumefactor")?;
-        let pub_minutes = get_optional_f64(dict, "pub_minutes")?.unwrap_or(0.0);
-        let episode_count = get_optional_f64(dict, "episode_count")?
-            .unwrap_or(1.0)
-            .max(1.0);
-        let mut fields = HashMap::new();
-        for (key, value) in dict.iter() {
-            let key = key.extract::<String>()?;
-            if value.is_none() {
-                continue;
+/// 解析 Python 侧已经按媒体筛选后的规则组。
+fn parse_filter_groups(groups: &Bound<'_, PyList>) -> PyResult<Vec<FilterGroup>> {
+    let mut result = Vec::new();
+    for item in groups.iter() {
+        let dict = item.downcast::<PyDict>()?;
+        let rule_string = get_optional_nonempty_string(dict, "rule_string")?.unwrap_or_default();
+        if rule_string.is_empty() {
+            continue;
+        }
+        let levels = rule_string
+            .split('>')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !levels.is_empty() {
+            result.push(FilterGroup { levels });
+        }
+    }
+    Ok(result)
+}
+
+impl RuleMatcher {
+    /// 构建规则查找表，保留 Python 规则对象引用以按需读取字段。
+    fn from_py(rule_set: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let mut rules = HashMap::new();
+        let mut match_fields = HashSet::new();
+        for (key, value) in rule_set.iter() {
+            if let Ok(rule) = value.downcast::<PyDict>() {
+                for field in get_string_list(rule, "match")? {
+                    match_fields.insert(field);
+                }
             }
-            if let Ok(values) = value.extract::<Vec<String>>() {
-                fields.insert(key, FieldValue::List(values));
-            } else {
-                fields.insert(key, FieldValue::Scalar(value.str()?.to_str()?.to_string()));
-            }
+            rules.insert(key.extract::<String>()?, value.into());
         }
         Ok(Self {
-            index,
-            title,
-            description,
-            labels,
-            size,
-            seeders,
-            downloadvolumefactor,
-            pub_minutes,
-            episode_count,
-            fields,
+            rules,
+            match_fields,
         })
     }
 
-    /// 返回指定字段的匹配文本。
-    fn content_for_matches(&self, match_fields: &[String]) -> String {
-        if match_fields.is_empty() {
-            return format!(
-                "{} {} {}",
-                self.title,
-                self.description,
-                self.labels.join(" ")
-            );
+    /// 根据规则名获取规则字典。
+    fn get<'py>(&self, py: Python<'py>, name: &str) -> Option<Bound<'py, PyDict>> {
+        self.rules
+            .get(name)?
+            .bind(py)
+            .downcast::<PyDict>()
+            .ok()
+            .cloned()
+    }
+}
+
+impl TorrentSnapshot {
+    /// 从 Python TorrentInfo 对象抽取过滤所需字段。
+    fn from_py(torrent: &Bound<'_, PyAny>, match_fields: &HashSet<String>) -> PyResult<Self> {
+        let title = object_optional_string(torrent, "title")?.unwrap_or_default();
+        let description = object_optional_string(torrent, "description")?.unwrap_or_default();
+        let labels = object_string_list(torrent, "labels")?;
+        let fields = selected_object_fields(torrent, match_fields, &title, &description, &labels)?;
+        Ok(Self {
+            title,
+            description,
+            labels,
+            fields,
+            size: object_optional_f64(torrent, "size")?.unwrap_or(0.0),
+            seeders: object_optional_i64(torrent, "seeders")?.unwrap_or(0),
+            downloadvolumefactor: object_optional_f64(torrent, "downloadvolumefactor")?,
+            pub_minutes: pub_minutes_from_py(torrent)?,
+        })
+    }
+
+    /// 拼接默认匹配内容：标题、副标题和标签。
+    fn default_content(&self) -> String {
+        format!(
+            "{} {} {}",
+            if self.title.is_empty() {
+                "None"
+            } else {
+                &self.title
+            },
+            if self.description.is_empty() {
+                "None"
+            } else {
+                &self.description
+            },
+            self.labels.join(" ")
+        )
+    }
+
+    /// 读取任意 TorrentInfo 字段的匹配文本列表。
+    fn field_values(&self, field: &str) -> Option<&Vec<String>> {
+        self.fields.get(field)
+    }
+}
+
+impl MediaSnapshot {
+    /// 从 Python MediaInfo 对象抽取 TMDB 规则可能访问的属性。
+    fn from_py(mediainfo: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let mut values = HashMap::new();
+        let Some(media) = mediainfo else {
+            return Ok(Self {
+                available: false,
+                values,
+            });
+        };
+        if media.is_none() {
+            return Ok(Self {
+                available: false,
+                values,
+            });
         }
-        let mut parts = Vec::new();
-        for field in match_fields {
-            if let Some(value) = self.fields.get(field) {
-                match value {
-                    FieldValue::Scalar(text) => {
-                        if !text.is_empty() {
-                            parts.push(text.clone());
-                        }
+        for attr in [
+            "type",
+            "category",
+            "original_language",
+            "tmdb_id",
+            "imdb_id",
+            "tvdb_id",
+            "douban_id",
+            "bangumi_id",
+            "collection_id",
+            "origin_country",
+            "genre_ids",
+            "production_countries",
+            "spoken_languages",
+            "languages",
+        ] {
+            let attr_values = media_attr_values(media, attr)?;
+            if !attr_values.is_empty() {
+                values.insert(attr.to_string(), attr_values);
+            }
+        }
+        if let Ok(dict) = media.getattr("__dict__") {
+            if let Ok(dict) = dict.downcast::<PyDict>() {
+                for (key, value) in dict.iter() {
+                    let key = key.extract::<String>()?;
+                    if values.contains_key(&key) || value.is_none() {
+                        continue;
                     }
-                    FieldValue::List(values) => {
-                        parts.extend(values.iter().filter(|v| !v.is_empty()).cloned())
+                    let attr_values = if key == "production_countries" {
+                        production_country_values(&value)?
+                    } else {
+                        py_any_to_string_list(&value)?
+                            .into_iter()
+                            .map(|item| item.to_uppercase())
+                            .collect::<Vec<_>>()
+                    };
+                    if !attr_values.is_empty() {
+                        values.insert(key, attr_values);
                     }
                 }
             }
         }
-        parts.join(" ")
+        Ok(Self {
+            available: true,
+            values,
+        })
+    }
+
+    /// 判断 TMDB 字段是否包含任一目标值。
+    fn matches(&self, attr: &str, value: &str) -> bool {
+        let Some(info_values) = self.values.get(attr) else {
+            return false;
+        };
+        let values = value
+            .split(',')
+            .filter(|item| !item.is_empty())
+            .map(|item| item.to_uppercase())
+            .collect::<Vec<_>>();
+        values
+            .iter()
+            .any(|value| info_values.iter().any(|info_value| info_value == value))
     }
 }
 
-/// 从 Python 字典读取字符串列表。
-fn get_string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>> {
-    let Some(value) = dict.get_item(key)? else {
-        return Ok(Vec::new());
-    };
-    if value.is_none() {
-        return Ok(Vec::new());
+/// 执行完整种子过滤并返回匹配优先级。
+fn match_torrent(
+    py: Python<'_>,
+    torrent: &TorrentSnapshot,
+    groups: &[FilterGroup],
+    matcher: &RuleMatcher,
+    media: &MediaSnapshot,
+    metainfo_options: Option<&Bound<'_, PyDict>>,
+    parsed_rule_cache: &mut HashMap<String, RuleExpr>,
+    episode_count_cache: &mut HashMap<String, i64>,
+) -> PyResult<Option<i64>> {
+    let mut last_priority = None;
+    for group in groups {
+        let mut priority = 100i64;
+        let mut matched_priority = None;
+        for level in &group.levels {
+            let expr = parse_cached_expr(level, parsed_rule_cache)?;
+            if match_group(
+                py,
+                torrent,
+                &expr,
+                matcher,
+                media,
+                metainfo_options,
+                episode_count_cache,
+            )? {
+                matched_priority = Some(priority);
+                break;
+            }
+            priority -= 1;
+        }
+        match matched_priority {
+            Some(priority) => last_priority = Some(priority),
+            None => return Ok(None),
+        }
     }
-    if let Ok(values) = value.extract::<Vec<String>>() {
-        return Ok(values);
-    }
-    Ok(vec![value.str()?.to_str()?.to_string()])
+    Ok(last_priority)
 }
 
-/// 执行规则 AST 匹配。
-fn match_expr(
+/// 延迟解析并缓存优先级层级表达式，保持命中高优先级后不解析低层级的语义。
+fn parse_cached_expr<'a>(
+    level: &str,
+    parsed_rule_cache: &'a mut HashMap<String, RuleExpr>,
+) -> PyResult<&'a RuleExpr> {
+    if !parsed_rule_cache.contains_key(level) {
+        let tokens = tokenize_rule(level)?;
+        let mut parser = RuleParserState::new(tokens);
+        let expr = parser.parse_expression()?;
+        if parser.has_remaining() {
+            return Err(PyValueError::new_err("规则表达式包含无法解析的剩余内容"));
+        }
+        parsed_rule_cache.insert(level.to_string(), expr);
+    }
+    Ok(parsed_rule_cache.get(level).expect("cached rule exists"))
+}
+
+/// 递归求值规则布尔表达式。
+fn match_group(
+    py: Python<'_>,
+    torrent: &TorrentSnapshot,
     expr: &RuleExpr,
-    torrent: &TorrentPayload,
-    rule_set: &Bound<'_, PyDict>,
-    media_info: Option<&Bound<'_, PyDict>>,
-    regex_cache: &mut HashMap<String, Regex>,
+    matcher: &RuleMatcher,
+    media: &MediaSnapshot,
+    metainfo_options: Option<&Bound<'_, PyDict>>,
+    episode_count_cache: &mut HashMap<String, i64>,
 ) -> PyResult<bool> {
     match expr {
-        RuleExpr::Name(name) => match_rule(name, torrent, rule_set, media_info, regex_cache),
-        RuleExpr::Not(inner) => Ok(!match_expr(
-            inner,
+        RuleExpr::Name(name) => match_rule(
+            py,
             torrent,
-            rule_set,
-            media_info,
-            regex_cache,
+            name,
+            matcher,
+            media,
+            metainfo_options,
+            episode_count_cache,
+        ),
+        RuleExpr::Not(inner) => Ok(!match_group(
+            py,
+            torrent,
+            inner,
+            matcher,
+            media,
+            metainfo_options,
+            episode_count_cache,
         )?),
         RuleExpr::And(left, right) => {
-            Ok(
-                match_expr(left, torrent, rule_set, media_info, regex_cache)?
-                    && match_expr(right, torrent, rule_set, media_info, regex_cache)?,
+            if !match_group(
+                py,
+                torrent,
+                left,
+                matcher,
+                media,
+                metainfo_options,
+                episode_count_cache,
+            )? {
+                return Ok(false);
+            }
+            match_group(
+                py,
+                torrent,
+                right,
+                matcher,
+                media,
+                metainfo_options,
+                episode_count_cache,
             )
         }
         RuleExpr::Or(left, right) => {
-            Ok(
-                match_expr(left, torrent, rule_set, media_info, regex_cache)?
-                    || match_expr(right, torrent, rule_set, media_info, regex_cache)?,
+            if match_group(
+                py,
+                torrent,
+                left,
+                matcher,
+                media,
+                metainfo_options,
+                episode_count_cache,
+            )? {
+                return Ok(true);
+            }
+            match_group(
+                py,
+                torrent,
+                right,
+                matcher,
+                media,
+                metainfo_options,
+                episode_count_cache,
             )
         }
     }
@@ -442,35 +611,26 @@ fn match_expr(
 
 /// 执行单条规则匹配。
 fn match_rule(
+    py: Python<'_>,
+    torrent: &TorrentSnapshot,
     rule_name: &str,
-    torrent: &TorrentPayload,
-    rule_set: &Bound<'_, PyDict>,
-    media_info: Option<&Bound<'_, PyDict>>,
-    regex_cache: &mut HashMap<String, Regex>,
+    matcher: &RuleMatcher,
+    media: &MediaSnapshot,
+    metainfo_options: Option<&Bound<'_, PyDict>>,
+    episode_count_cache: &mut HashMap<String, i64>,
 ) -> PyResult<bool> {
-    let Some(rule_obj) = rule_set.get_item(rule_name)? else {
+    let Some(rule) = matcher.get(py, rule_name) else {
         return Ok(false);
     };
-    let rule = rule_obj.downcast::<PyDict>()?;
-    if let Some(tmdb_obj) = rule.get_item("tmdb")? {
-        if !tmdb_obj.is_none() {
-            if let Ok(tmdb) = tmdb_obj.downcast::<PyDict>() {
-                if match_tmdb(tmdb, media_info)? {
-                    return Ok(true);
-                }
-            }
-        }
+    if match_tmdb_rule(&rule, media)? {
+        return Ok(true);
     }
-
-    let match_fields = get_string_list(rule, "match")?;
-    let content = torrent.content_for_matches(&match_fields);
-    let includes = get_string_list(rule, "include")?;
-    let excludes = get_string_list(rule, "exclude")?;
-
+    let content = rule_match_content(&rule, torrent)?;
+    let includes = get_string_list(&rule, "include")?;
     if !includes.is_empty() {
         let mut included = false;
-        for pattern in &includes {
-            if regex_search(pattern, &content, regex_cache)? {
+        for pattern in includes {
+            if regex_search(&pattern, &content)? {
                 included = true;
                 break;
             }
@@ -479,162 +639,287 @@ fn match_rule(
             return Ok(false);
         }
     }
-    for exclude in excludes {
-        if regex_search(&exclude, &content, regex_cache)? {
+    let excludes = get_string_list(&rule, "exclude")?;
+    for pattern in excludes {
+        if regex_search(&pattern, &content)? {
             return Ok(false);
         }
     }
-    if let Some(size_range) = get_optional_string(rule, "size_range")? {
-        if !match_size(torrent, &size_range)? {
+    if let Some(size_range) = get_optional_nonempty_string(&rule, "size_range")? {
+        if !match_size(torrent, &size_range, metainfo_options, episode_count_cache)? {
             return Ok(false);
         }
     }
-    if let Some(seeders) = get_optional_i64(rule, "seeders")? {
+    if let Some(seeders) = get_optional_i64(&rule, "seeders")? {
         if torrent.seeders < seeders {
             return Ok(false);
         }
     }
-    if let Some(downloadvolumefactor) = get_optional_f64(rule, "downloadvolumefactor")? {
-        if torrent.downloadvolumefactor != Some(downloadvolumefactor) {
+    if let Some(download_factor) = get_optional_f64(&rule, "downloadvolumefactor")? {
+        if torrent.downloadvolumefactor != Some(download_factor) {
             return Ok(false);
         }
     }
-    if let Some(pubdate) = get_optional_string(rule, "publish_time")? {
-        if !match_publish_time(torrent.pub_minutes, &pubdate) {
+    if let Some(publish_time) = get_optional_nonempty_string(&rule, "publish_time")? {
+        if !match_publish_time(torrent.pub_minutes, &publish_time)? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-/// 使用带缓存的忽略大小写正则搜索。
-fn regex_search(
-    pattern: &str,
-    content: &str,
-    cache: &mut HashMap<String, Regex>,
-) -> PyResult<bool> {
-    if !cache.contains_key(pattern) {
-        let regex = RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .build()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        cache.insert(pattern.to_string(), regex);
-    }
-    Ok(cache
-        .get(pattern)
-        .is_some_and(|regex| regex.is_match(content)))
-}
-
-/// 匹配 TMDB 媒体属性规则。
-fn match_tmdb(tmdb: &Bound<'_, PyDict>, media_info: Option<&Bound<'_, PyDict>>) -> PyResult<bool> {
-    let Some(media) = media_info else {
+/// 判断规则中的 TMDB 条件是否匹配媒体信息。
+fn match_tmdb_rule(rule: &Bound<'_, PyDict>, media: &MediaSnapshot) -> PyResult<bool> {
+    let Some(tmdb_obj) = rule.get_item("tmdb")? else {
         return Ok(false);
     };
-    for (attr, value) in tmdb.iter() {
+    if tmdb_obj.is_none() {
+        return Ok(false);
+    }
+    if !media.available {
+        return Ok(false);
+    }
+    let tmdb = tmdb_obj.downcast::<PyDict>()?;
+    for (key, value) in tmdb.iter() {
         if value.is_none() {
             continue;
         }
-        let attr_name = attr.extract::<String>()?;
-        let expected = value.str()?.to_str()?.to_string();
-        if expected.is_empty() {
+        let value = value.str()?.to_str()?.to_string();
+        if value.is_empty() {
             continue;
         }
-        let info_values = media_values(media, &attr_name)?;
-        if info_values.is_empty() {
-            return Ok(false);
-        }
-        let expected_values: Vec<String> = expected
-            .split(',')
-            .filter(|item| !item.is_empty())
-            .map(|item| item.to_uppercase())
-            .collect();
-        if !expected_values.iter().any(|expected_item| {
-            info_values
-                .iter()
-                .any(|info_item| info_item == expected_item)
-        }) {
+        if !media.matches(&key.extract::<String>()?, &value) {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-/// 获取媒体属性的可比较字符串集合。
-fn media_values(media: &Bound<'_, PyDict>, attr_name: &str) -> PyResult<Vec<String>> {
-    let Some(value) = media.get_item(attr_name)? else {
+/// 计算规则实际用于正则匹配的内容。
+fn rule_match_content(rule: &Bound<'_, PyDict>, torrent: &TorrentSnapshot) -> PyResult<String> {
+    let matches = get_string_list(rule, "match")?;
+    if matches.is_empty() {
+        return Ok(torrent.default_content());
+    }
+    let mut content = Vec::new();
+    for field in matches {
+        if let Some(values) = torrent.field_values(&field) {
+            content.extend(values.iter().filter(|item| !item.is_empty()).cloned());
+        }
+    }
+    if content.is_empty() {
+        Ok(torrent.default_content())
+    } else {
+        Ok(content.join(" "))
+    }
+}
+
+/// 匹配大小范围，剧集按总集数折算单集大小。
+fn match_size(
+    torrent: &TorrentSnapshot,
+    size_range: &str,
+    metainfo_options: Option<&Bound<'_, PyDict>>,
+    episode_count_cache: &mut HashMap<String, i64>,
+) -> PyResult<bool> {
+    let cache_key = format!("{}\n{}", torrent.title, torrent.description);
+    let episode_count = match episode_count_cache.get(&cache_key) {
+        Some(value) => *value,
+        None => {
+            let value = parse_total_episode_for_filter(
+                torrent.title.as_str(),
+                Some(torrent.description.as_str()),
+                metainfo_options,
+            )?;
+            episode_count_cache.insert(cache_key, value);
+            value
+        }
+    }
+    .max(1) as f64;
+    let torrent_size = torrent.size / episode_count;
+    match parse_size_range(size_range)? {
+        SizeRange::Between(min, max) => Ok(min <= torrent_size && torrent_size <= max),
+        SizeRange::Gte(min) => Ok(torrent_size >= min),
+        SizeRange::Lte(max) => Ok(torrent_size <= max),
+        SizeRange::Unknown => Ok(false),
+    }
+}
+
+enum SizeRange {
+    Between(f64, f64),
+    Gte(f64),
+    Lte(f64),
+    Unknown,
+}
+
+/// 解析大小规则，单位与 Python 旧实现保持为 MB。
+fn parse_size_range(size_range: &str) -> PyResult<SizeRange> {
+    let size_range = size_range.trim();
+    if let Some((left, right)) = size_range.split_once('-') {
+        return Ok(SizeRange::Between(
+            parse_f64(left.trim(), "大小范围")? * SIZE_UNIT,
+            parse_f64(right.trim(), "大小范围")? * SIZE_UNIT,
+        ));
+    }
+    if let Some(value) = size_range.strip_prefix('>') {
+        return Ok(SizeRange::Gte(
+            parse_f64(value.trim(), "大小范围")? * SIZE_UNIT,
+        ));
+    }
+    if let Some(value) = size_range.strip_prefix('<') {
+        return Ok(SizeRange::Lte(
+            parse_f64(value.trim(), "大小范围")? * SIZE_UNIT,
+        ));
+    }
+    Ok(SizeRange::Unknown)
+}
+
+/// 匹配发布时间分钟数范围。
+fn match_publish_time(pub_minutes: f64, publish_time: &str) -> PyResult<bool> {
+    let values = publish_time
+        .split('-')
+        .map(|item| parse_f64(item, "发布时间规则"))
+        .collect::<PyResult<Vec<_>>>()?;
+    if values.len() == 1 {
+        Ok(pub_minutes >= values[0])
+    } else if values.len() >= 2 {
+        Ok(values[0] <= pub_minutes && pub_minutes <= values[1])
+    } else {
+        Ok(true)
+    }
+}
+
+/// 执行忽略大小写的正则搜索，按规则文本缓存编译结果。
+fn regex_search(pattern: &str, content: &str) -> PyResult<bool> {
+    let cache_key = format!("(?i){pattern}");
+    if let Ok(guard) = REGEX_CACHE.lock() {
+        if let Some(regex) = guard.get(&cache_key) {
+            return regex
+                .is_match(content)
+                .map_err(|err| PyValueError::new_err(err.to_string()));
+        }
+    }
+    let regex =
+        FancyRegex::new(&cache_key).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let result = regex
+        .is_match(content)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    if let Ok(mut guard) = REGEX_CACHE.lock() {
+        guard.insert(cache_key, regex);
+    }
+    Ok(result)
+}
+
+/// 抽取媒体字段值并统一转为大写字符串列表。
+fn media_attr_values(media: &Bound<'_, PyAny>, attr: &str) -> PyResult<Vec<String>> {
+    let Ok(value) = media.getattr(attr) else {
         return Ok(Vec::new());
     };
     if value.is_none() {
         return Ok(Vec::new());
     }
-    if attr_name == "production_countries" {
-        let Ok(items) = value.downcast::<PyList>() else {
-            return Ok(Vec::new());
-        };
-        let mut values = Vec::new();
-        for item in items.iter() {
-            if let Ok(dict) = item.downcast::<PyDict>() {
-                if let Some(country) = dict.get_item("iso_3166_1")? {
-                    values.push(country.str()?.to_str()?.to_uppercase());
-                }
+    if attr == "production_countries" {
+        return production_country_values(&value);
+    }
+    let mut result = py_any_to_string_list(&value)?
+        .into_iter()
+        .map(|item| item.to_uppercase())
+        .collect::<Vec<_>>();
+    if result.is_empty() {
+        let text = value.str()?.to_str()?.to_uppercase();
+        if !text.is_empty() {
+            result.push(text);
+        }
+    }
+    Ok(result)
+}
+
+/// 从 TMDB production_countries 字段提取 iso_3166_1。
+fn production_country_values(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let Ok(list) = value.downcast::<PyList>() else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for item in list.iter() {
+        if let Ok(dict) = item.downcast::<PyDict>() {
+            if let Some(code) = get_optional_nonempty_string(dict, "iso_3166_1")? {
+                result.push(code.to_uppercase());
             }
         }
-        return Ok(values);
     }
-    if let Ok(items) = value.extract::<Vec<String>>() {
-        return Ok(items.into_iter().map(|item| item.to_uppercase()).collect());
-    }
-    Ok(vec![value.str()?.to_str()?.to_uppercase()])
+    Ok(result)
 }
 
-/// 按每集大小匹配大小范围规则。
-fn match_size(torrent: &TorrentPayload, size_range: &str) -> PyResult<bool> {
-    let torrent_size = torrent.size / torrent.episode_count;
-    let size_range = size_range.trim();
-    let unit = 1024.0 * 1024.0;
-    if let Some((min, max)) = size_range.split_once('-') {
-        let min = min
-            .trim()
-            .parse::<f64>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?
-            * unit;
-        let max = max
-            .trim()
-            .parse::<f64>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?
-            * unit;
-        return Ok(min <= torrent_size && torrent_size <= max);
+/// 按规则 match 字段读取 TorrentInfo 属性，避免热路径遍历整个 __dict__。
+fn selected_object_fields(
+    torrent: &Bound<'_, PyAny>,
+    match_fields: &HashSet<String>,
+    title: &str,
+    description: &str,
+    labels: &[String],
+) -> PyResult<HashMap<String, Vec<String>>> {
+    let mut result = HashMap::new();
+    for field in match_fields {
+        match field.as_str() {
+            "title" => {
+                if !title.is_empty() {
+                    result.insert(field.clone(), vec![title.to_string()]);
+                }
+                continue;
+            }
+            "description" => {
+                if !description.is_empty() {
+                    result.insert(field.clone(), vec![description.to_string()]);
+                }
+                continue;
+            }
+            "labels" => {
+                if !labels.is_empty() {
+                    result.insert(field.clone(), labels.to_vec());
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let Ok(value) = torrent.getattr(field) else {
+            continue;
+        };
+        if value.is_none() || !value.is_truthy()? {
+            continue;
+        }
+        let values = if let Ok(list) = value.downcast::<PyList>() {
+            let mut items = Vec::new();
+            for item in list.iter() {
+                if !item.is_none() && item.is_truthy()? {
+                    items.push(item.str()?.to_str()?.to_string());
+                }
+            }
+            items
+        } else {
+            vec![value.str()?.to_str()?.to_string()]
+        };
+        if !values.is_empty() {
+            result.insert(field.clone(), values);
+        }
     }
-    if let Some(min) = size_range.strip_prefix('>') {
-        let min = min
-            .trim()
-            .parse::<f64>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?
-            * unit;
-        return Ok(torrent_size >= min);
-    }
-    if let Some(max) = size_range.strip_prefix('<') {
-        let max = max
-            .trim()
-            .parse::<f64>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?
-            * unit;
-        return Ok(torrent_size <= max);
-    }
-    Ok(false)
+    Ok(result)
 }
 
-/// 匹配发布时间分钟数规则。
-fn match_publish_time(pub_minutes: f64, publish_time: &str) -> bool {
-    let values: Vec<f64> = publish_time
-        .split('-')
-        .filter_map(|item| item.parse::<f64>().ok())
-        .collect();
-    if values.len() == 1 {
-        return pub_minutes >= values[0];
-    }
-    if values.len() >= 2 {
-        return values[0] <= pub_minutes && pub_minutes <= values[1];
-    }
-    true
+/// 用 Rust 复刻 TorrentInfo.pub_minutes，避免过滤热路径回调 Python 方法。
+fn pub_minutes_from_py(torrent: &Bound<'_, PyAny>) -> PyResult<f64> {
+    let Some(pubdate) = object_optional_string(torrent, "pubdate")? else {
+        return Ok(0.0);
+    };
+    let Ok(pubdate) = NaiveDateTime::parse_from_str(&pubdate, "%Y-%m-%d %H:%M:%S") else {
+        return Ok(0.0);
+    };
+    let now = Local::now().naive_local();
+    Ok((now - pubdate).num_seconds().div_euclid(60) as f64)
+}
+
+/// 解析浮点数字符串，保持 Python float 转换失败时抛异常的语义。
+fn parse_f64(value: &str, context: &str) -> PyResult<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .map_err(|err| PyValueError::new_err(format!("{context}解析失败: {err}")))
 }
