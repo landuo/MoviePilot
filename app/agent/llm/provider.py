@@ -105,6 +105,7 @@ class LLMProviderManager(metaclass=Singleton):
     _MODELS_DEV_URL = "https://models.dev/api.json"
     _MODELS_DEV_BUNDLED_PATH = Path(__file__).with_name("models.json")
     _MODELS_DEV_CACHE_TTL = 7 * 24 * 60 * 60
+    _AUTH_SESSION_DONE_RETENTION = 300
     _CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
     _CHATGPT_ISSUER = "https://auth.openai.com"
     _CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -182,6 +183,33 @@ class LLMProviderManager(metaclass=Singleton):
         self._models_dev_cache_path = (
                 Path(settings.TEMP_PATH) / "llm_provider_models_dev_cache.json"
         )
+
+    def _cleanup_auth_sessions_locked(self, now: Optional[float] = None) -> None:
+        """
+        清理过期或已完成一段时间的临时授权会话。
+
+        调用方必须已经持有 `_lock`，这样 `_pending_sessions` 与
+        `_oauth_state_index` 能保持一致，避免 state 残留。
+        """
+        now = time.time() if now is None else now
+        expired_session_ids = []
+        for session_id, session in self._pending_sessions.items():
+            expires_at = session.expires_at or session.created_at + 600
+            if session.status == "pending":
+                if expires_at <= now:
+                    expired_session_ids.append(session_id)
+            elif expires_at + self._AUTH_SESSION_DONE_RETENTION <= now:
+                expired_session_ids.append(session_id)
+
+        if not expired_session_ids:
+            return
+
+        expired_session_ids_set = set(expired_session_ids)
+        for session_id in expired_session_ids:
+            self._pending_sessions.pop(session_id, None)
+        for state, session_id in list(self._oauth_state_index.items()):
+            if session_id in expired_session_ids_set:
+                self._oauth_state_index.pop(state, None)
 
     @staticmethod
     def _builtin_provider_specs() -> tuple[ProviderSpec, ...]:
@@ -671,6 +699,88 @@ class LLMProviderManager(metaclass=Singleton):
                 model_list_strategy="models_dev_only",
                 description="腾讯兼容端点。",
                 sort_order=170,
+            ),
+            ProviderSpec(
+                id="china-unicom",
+                name="中国联通",
+                runtime="openai_compatible",
+                default_base_url="https://aigw-gzgy2.cucloud.cn:8443/v1",
+                base_url_presets=(
+                    url_preset(
+                        id="china-unicom-coding-openai",
+                        label="Coding Plan / OpenAI",
+                        value="https://aigw-gzgy2.cucloud.cn:8443/v1",
+                        model_list_strategy="manual",
+                    ),
+                    url_preset(
+                        id="china-unicom-coding-anthropic",
+                        label="Coding Plan / Anthropic",
+                        value="https://aigw-gzgy2.cucloud.cn:8443",
+                        runtime="anthropic_compatible",
+                        model_list_strategy="manual",
+                    ),
+                ),
+                base_url_editable=True,
+                api_key_hint="填写联通云 AISP / Coding Plan 专属 API Key；模型名称请按控制台可用模型 ID 手动填写。",
+                supports_model_refresh=False,
+                model_list_strategy="manual",
+                description="联通云 AISP Coding Plan 兼容端点，支持 OpenAI 与 Anthropic 协议地址预设。",
+                sort_order=172,
+            ),
+            ProviderSpec(
+                id="china-mobile",
+                name="中国移动",
+                runtime="openai_compatible",
+                default_base_url="https://ecloud.10086.cn/api",
+                base_url_presets=(
+                    url_preset(
+                        id="china-mobile-moma",
+                        label="MoMA / 移动云",
+                        value="https://ecloud.10086.cn/api",
+                    ),
+                    url_preset(
+                        id="china-mobile-coding",
+                        label="Coding Plan / 移动智算包",
+                        value="https://zhenze-huhehaote.cmecloud.cn/api/coding/v1",
+                    ),
+                ),
+                base_url_editable=True,
+                api_key_hint="填写中国移动 MoMA / 移动云 Token 服务 API Key；如控制台下发专属域名，请覆盖 Base URL。",
+                supports_model_refresh=False,
+                model_list_strategy="manual",
+                description="中国移动 MoMA / 移动云 OpenAI-compatible Token 服务，支持专属域名覆盖。",
+                sort_order=174,
+            ),
+            ProviderSpec(
+                id="china-telecom",
+                name="中国电信",
+                runtime="openai_compatible",
+                default_base_url="https://wishub-x6.ctyun.cn/v1",
+                base_url_presets=(
+                    url_preset(
+                        id="china-telecom-token-service",
+                        label="Token 服务 / 息壤",
+                        value="https://wishub-x6.ctyun.cn/v1",
+                    ),
+                    url_preset(
+                        id="china-telecom-coding-openai",
+                        label="编码套餐 / OpenAI",
+                        value="https://wishub-x6.ctyun.cn/coding/v1",
+                        model_list_strategy="manual",
+                    ),
+                    url_preset(
+                        id="china-telecom-coding-anthropic",
+                        label="编码套餐 / Anthropic",
+                        value="https://wishub-x6.ctyun.cn/coding/v1",
+                        runtime="anthropic_compatible",
+                        model_list_strategy="manual",
+                    ),
+                ),
+                base_url_editable=True,
+                api_key_label="App Key",
+                api_key_hint="填写天翼云 Token 服务 / 息壤 App Key；编码套餐模型请按控制台展示的模型 ID 手动填写。",
+                description="天翼云 Token 服务（原模型推理服务）OpenAI-compatible 端点，支持通用与编码套餐地址预设。",
+                sort_order=176,
             ),
             ProviderSpec(
                 id="ollama-cloud",
@@ -1919,6 +2029,7 @@ class LLMProviderManager(metaclass=Singleton):
                 }
             )
             with self._lock:
+                self._cleanup_auth_sessions_locked()
                 self._pending_sessions[session.session_id] = session
                 self._oauth_state_index[state] = session.session_id
             return {
@@ -1953,6 +2064,7 @@ class LLMProviderManager(metaclass=Singleton):
                 }
             )
             with self._lock:
+                self._cleanup_auth_sessions_locked()
                 self._pending_sessions[session.session_id] = session
             return {
                 "session_id": session.session_id,
@@ -1991,6 +2103,7 @@ class LLMProviderManager(metaclass=Singleton):
                 }
             )
             with self._lock:
+                self._cleanup_auth_sessions_locked()
                 self._pending_sessions[session.session_id] = session
             return {
                 "session_id": session.session_id,
@@ -2007,6 +2120,7 @@ class LLMProviderManager(metaclass=Singleton):
     def get_session_status(self, session_id: str) -> dict[str, Any]:
         """读取临时授权会话状态。"""
         with self._lock:
+            self._cleanup_auth_sessions_locked()
             session = self._pending_sessions.get(session_id)
             if not session:
                 raise LLMProviderAuthError("授权会话不存在或已过期")
@@ -2053,6 +2167,7 @@ class LLMProviderManager(metaclass=Singleton):
         if error:
             message = error_description or error
             with self._lock:
+                self._cleanup_auth_sessions_locked()
                 session_id = self._oauth_state_index.pop(state or "", None)
                 if session_id and session_id in self._pending_sessions:
                     self._mark_session_error(self._pending_sessions[session_id], message)
@@ -2062,6 +2177,7 @@ class LLMProviderManager(metaclass=Singleton):
             return False, "缺少授权码或 state 参数"
 
         with self._lock:
+            self._cleanup_auth_sessions_locked()
             session_id = self._oauth_state_index.pop(state, None)
             session = self._pending_sessions.get(session_id or "")
 
@@ -2104,6 +2220,7 @@ class LLMProviderManager(metaclass=Singleton):
         前端可按 interval_seconds 轮询，直到状态变为 authorized / failed。
         """
         with self._lock:
+            self._cleanup_auth_sessions_locked()
             session = self._pending_sessions.get(session_id)
         if not session:
             raise LLMProviderAuthError("授权会话不存在或已过期")
