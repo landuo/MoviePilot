@@ -14,10 +14,8 @@ from app.schemas.types import SystemConfigKey
 class UpdateCustomIdentifiersInput(BaseModel):
     """更新自定义识别词工具的输入参数模型"""
 
-    explanation: str = Field(
-        ...,
-        description="Clear explanation of why this tool is being used in the current context",
-    )
+    explanation: Optional[str] = Field(None,
+        description="Clear explanation of why this tool is being used in the current context",)
     identifiers: List[str] = Field(
         ...,
         description=(
@@ -50,7 +48,8 @@ class UpdateCustomIdentifiersTool(MoviePilotTool):
         "3) Episode offset: '前定位词 <> 后定位词 >> EP±N'; "
         "4) Combined: '被替换词 => 替换词 && 前定位词 <> 后定位词 >> EP±N'; "
         "Lines starting with '#' are comments. "
-        "The replacement target supports: {[tmdbid=xxx;type=movie/tv;s=xxx;e=xxx]} for direct TMDB ID matching."
+        "The replacement target supports: {[tmdbid=xxx;type=movie/tv;g=xxx;s=xxx;e=xxx]} "
+        "for direct TMDB ID matching; g is an optional TMDB episode group ID for TV recognition."
     )
     require_admin: bool = True
     args_schema: Type[BaseModel] = UpdateCustomIdentifiersInput

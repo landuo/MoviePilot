@@ -441,6 +441,8 @@ class ConfigModel(BaseModel):
     )
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True
+    # 安装版本统计上报
+    USAGE_STATISTIC_SHARE: bool = True
     # 是否开启插件热加载
     PLUGIN_AUTO_RELOAD: bool = False
     # 本地插件仓库目录，多个地址使用,分隔
@@ -562,6 +564,8 @@ class ConfigModel(BaseModel):
             "qpic.cn",
         ]
     )
+    # 图片代理允许访问的非公网 IP/CIDR，默认不放行任何非公网解析结果
+    IMAGE_PROXY_ALLOWED_PRIVATE_RANGES: list = Field(default=[])
     # 允许的图片文件后缀格式
     SECURITY_IMAGE_SUFFIXES: list = Field(
         default=[".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif"]
@@ -652,7 +656,7 @@ class ConfigModel(BaseModel):
     # AI智能体自动重试整理失败记录开关
     AI_AGENT_RETRY_TRANSFER: bool = False
 
-    # 音频输入提供商：openai/openai_chat_audio/mimo
+    # 音频输入提供商：openai/openai_chat_audio/mimo/minimax
     AUDIO_INPUT_PROVIDER: str = "openai"
     # 音频输入 API 密钥
     AUDIO_INPUT_API_KEY: Optional[str] = None
@@ -662,7 +666,7 @@ class ConfigModel(BaseModel):
     AUDIO_INPUT_MODEL: str = "gpt-4o-mini-transcribe"
     # 音频输入识别语言
     AUDIO_INPUT_LANGUAGE: str = "zh"
-    # 音频输出提供商：openai/openai_chat_audio/mimo
+    # 音频输出提供商：openai/openai_chat_audio/mimo/minimax
     AUDIO_OUTPUT_PROVIDER: str = "openai"
     # 音频输出 API 密钥
     AUDIO_OUTPUT_API_KEY: Optional[str] = None

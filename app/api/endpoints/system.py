@@ -30,12 +30,12 @@ from app.db.user_oper import (
     get_current_active_user_async,
 )
 from app.helper.image import ImageHelper
-from app.helper.mediaserver import MediaServerHelper
 from app.helper.message import MessageHelper
 from app.helper.progress import ProgressHelper
 from app.helper.rule import RuleHelper
 from app.helper.subscribe import SubscribeHelper
 from app.helper.system import SystemHelper
+from app.helper.usage import UsageHelper
 from app.log import logger
 from app.scheduler import Scheduler
 from app.schemas import ConfigChangeEventData
@@ -359,13 +359,19 @@ async def fetch_image(
     if allowed_domains is None:
         allowed_domains = set(settings.SECURITY_IMAGE_DOMAINS)
 
+    fetch_url = SecurityUtils.strip_url_signature(url)
     # 验证URL安全性
-    if not SecurityUtils.is_safe_url(url, allowed_domains, block_private=True):
+    if not await SecurityUtils.is_safe_url_async(
+        url,
+        allowed_domains,
+        block_private=True,
+        allowed_private_ranges=settings.IMAGE_PROXY_ALLOWED_PRIVATE_RANGES,
+    ) and not (fetch_url := SecurityUtils.verify_signed_url(url)):
         logger.warn(f"Blocked unsafe image URL: {url}")
         return None
 
     content = await ImageHelper().async_fetch_image(
-        url=url,
+        url=fetch_url,
         proxy=proxy,
         use_cache=use_cache,
         cookies=cookies,
@@ -380,7 +386,7 @@ async def fetch_image(
         # 返回缓存图片
         return Response(
             content=content,
-            media_type=UrlUtils.get_mime_type(url, "image/jpeg"),
+            media_type=UrlUtils.get_mime_type(fetch_url, "image/jpeg"),
             headers=headers,
         )
     return None
@@ -398,13 +404,7 @@ async def proxy_img(
     """
     图片代理，可选是否使用代理服务器，支持 HTTP 缓存
     """
-    # 媒体服务器添加图片代理支持
-    hosts = [
-        config.config.get("host")
-        for config in MediaServerHelper().get_configs().values()
-        if config and config.config and config.config.get("host")
-    ]
-    allowed_domains = set(settings.SECURITY_IMAGE_DOMAINS) | set(hosts)
+    allowed_domains = set(settings.SECURITY_IMAGE_DOMAINS)
     cookies = (
         MediaServerChain().get_image_cookies(server=None, image_url=imgurl)
         if use_cookies
@@ -519,6 +519,14 @@ async def get_env_setting(_: User = Depends(get_current_active_user_async)):
         }
     )
     return schemas.Response(success=True, data=info)
+
+
+@router.get("/usage/statistic", summary="查询安装版本统计报表", response_model=schemas.Response)
+async def usage_statistic(_: User = Depends(get_current_active_user_async)):
+    """
+    查询安装版本统计报表
+    """
+    return schemas.Response(success=True, data=await UsageHelper().async_get_statistic())
 
 
 @router.post("/env", summary="更新系统配置", response_model=schemas.Response)

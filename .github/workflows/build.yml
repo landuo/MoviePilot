@@ -57,7 +57,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -72,8 +72,8 @@ jobs:
           # 任何 fork 跑时则指向 fork 自身。需配合 build-workers.yml 已发布对应 release。
           build-args: |
             WORKERS_REPO=${{ github.repository }}
-          cache-from: type=gha, scope=${{ github.workflow }}-docker
-          cache-to: type=gha, scope=${{ github.workflow }}-docker
+          cache-from: type=gha,scope=moviepilot-docker,version=2
+          cache-to: type=gha,scope=moviepilot-docker,mode=max,version=2
 
       - name: Generate Changelog
         id: changelog
