@@ -618,6 +618,8 @@ class ConfigModel(BaseModel):
     LLM_BASE_URL_PRESET: Optional[str] = None
     # LLM最大上下文Token数量（K）
     LLM_MAX_CONTEXT_TOKENS: int = 64
+    # LLM OpenAI兼容接口请求User-Agent
+    LLM_USER_AGENT: Optional[str] = None
     # LLM温度参数
     LLM_TEMPERATURE: float = 0.3
     # LLM最大迭代次数

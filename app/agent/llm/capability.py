@@ -146,6 +146,8 @@ class OpenAIChatAudioProvider(AudioCapabilityProvider):
         ".opus": "audio/ogg",
         ".wav": "audio/wav",
     }
+    TRANSCODED_STT_SUFFIX = ".wav"
+    TRANSCODED_STT_SAMPLE_RATE = "16000"
 
     def _build_client(self, api_key: str, base_url: Optional[str]):
         from openai import OpenAI
@@ -229,6 +231,76 @@ class OpenAIChatAudioProvider(AudioCapabilityProvider):
             "format": self._guess_audio_format(filename),
         }
 
+    def _normalize_audio_for_transcription(
+        self, content: bytes, filename: str
+    ) -> Optional[tuple[bytes, str]]:
+        """
+        将转写输入归一化为 Chat Audio provider 明确支持的格式。
+
+        :param content: 原始音频字节
+        :param filename: 原始音频文件名
+        :return: 成功时返回可提交的音频字节和文件名，失败时返回 None
+        """
+        suffix = Path(filename or "").suffix.lower()
+        if suffix in self.SUPPORTED_AUDIO_MIME_TYPES:
+            return content, filename
+        return self._convert_audio_for_transcription(content=content, filename=filename)
+
+    def _convert_audio_for_transcription(
+        self, content: bytes, filename: str
+    ) -> Optional[tuple[bytes, str]]:
+        """
+        将 AMR 等第三方 STT 不支持的输入转为 WAV。
+
+        :param content: 原始音频字节
+        :param filename: 原始音频文件名
+        :return: 成功时返回 WAV 字节和文件名，失败时返回 None
+        """
+        if not shutil.which("ffmpeg"):
+            logger.warning(
+                "%s STT 不支持当前音频格式且 ffmpeg 不可用，无法转码: filename=%s",
+                self.DISPLAY_NAME,
+                filename,
+            )
+            return None
+
+        suffix = Path(filename or "").suffix.lower() or ".audio"
+        voice_dir = settings.TEMP_PATH / "voice"
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        input_path = voice_dir / f"{uuid4().hex}{suffix}"
+        output_path = input_path.with_suffix(self.TRANSCODED_STT_SUFFIX)
+        try:
+            input_path.write_bytes(content)
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(input_path),
+                "-ar",
+                self.TRANSCODED_STT_SAMPLE_RATE,
+                "-ac",
+                "1",
+                "-f",
+                "wav",
+                str(output_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode != 0 or not output_path.exists():
+                logger.warning(
+                    "%s STT 音频转 WAV 失败: returncode=%s, stderr=%s",
+                    self.DISPLAY_NAME,
+                    result.returncode,
+                    (result.stderr or "").strip()[:500],
+                )
+                return None
+            return output_path.read_bytes(), f"{input_path.stem}{self.TRANSCODED_STT_SUFFIX}"
+        finally:
+            for temp_path in (input_path, output_path):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as err:
+                    logger.debug(f"清理 STT 临时音频失败: path={temp_path}, error={err}")
+
     @staticmethod
     def _extract_message_text(message) -> Optional[str]:
         """兼容音频理解响应可能放在 content 或 reasoning_content 的情况。"""
@@ -310,6 +382,12 @@ class OpenAIChatAudioProvider(AudioCapabilityProvider):
             if not api_key:
                 raise ValueError("音频输入 provider 未配置 API Key")
             client = self._build_client(api_key=api_key, base_url=base_url)
+            normalized_audio = self._normalize_audio_for_transcription(
+                content=content, filename=filename
+            )
+            if not normalized_audio:
+                return None
+            content, filename = normalized_audio
             language = (settings.AUDIO_INPUT_LANGUAGE or "").strip()
             prompt = "请将这段音频完整转写为文字，只输出转写结果，不要添加解释。"
             if language:
@@ -656,29 +734,61 @@ class AgentCapabilityManager:
         return cls.REPLY_MODE_TEXT
 
     @classmethod
-    def supports_native_voice_reply(
-        cls, channel: Optional[str], source: Optional[str]
-    ) -> bool:
-        """判断当前渠道是否支持原生语音消息发送。"""
+    def _parse_message_channel(cls, channel: Optional[Any]):
+        """将渠道入参归一化为消息渠道枚举。"""
         if not channel:
+            return None
+
+        from app.schemas.types import MessageChannel
+
+        if isinstance(channel, MessageChannel):
+            return channel
+
+        channel_text = str(channel).strip()
+        if not channel_text:
+            return None
+        lowered_channel = channel_text.lower()
+        for channel_item in MessageChannel:
+            aliases = {
+                channel_item.value.lower(),
+                channel_item.name.lower(),
+                f"{MessageChannel.__name__}.{channel_item.name}".lower(),
+            }
+            if lowered_channel in aliases:
+                return channel_item
+        return None
+
+    @staticmethod
+    def _is_wechat_app_mode(source: Optional[str]) -> bool:
+        """判断企业微信来源是否为自建应用模式。"""
+        if not source:
             return False
 
         from app.helper.service import ServiceConfigHelper
-        from app.schemas.types import MessageChannel
 
-        try:
-            channel_enum = MessageChannel(channel)
-        except (TypeError, ValueError):
-            return False
-
-        if channel_enum == MessageChannel.Telegram:
-            return True
-        if channel_enum != MessageChannel.Wechat:
-            return False
-
-        # 企业微信 bot 模式不支持发送语音，只有应用模式可用。
         for config in ServiceConfigHelper.get_notification_configs():
             if config.name != source:
                 continue
             return (config.config or {}).get("WECHAT_MODE", "app") != "bot"
         return False
+
+    @classmethod
+    def supports_native_voice_reply(
+            cls, channel: Optional[str], source: Optional[str]
+    ) -> bool:
+        """判断当前渠道是否支持原生语音消息发送。"""
+        from app.schemas.message import ChannelCapability, ChannelCapabilityManager
+        from app.schemas.types import MessageChannel
+
+        channel_enum = cls._parse_message_channel(channel)
+        if not channel_enum:
+            return False
+
+        if not ChannelCapabilityManager.supports_capability(
+                channel_enum, ChannelCapability.AUDIO_OUTPUT
+        ):
+            return False
+
+        if channel_enum == MessageChannel.Wechat:
+            return cls._is_wechat_app_mode(source)
+        return True

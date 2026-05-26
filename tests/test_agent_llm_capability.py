@@ -11,6 +11,8 @@ sys.modules.setdefault("psutil", Mock())
 sys.modules.setdefault("pyquery", Mock())
 
 from app.core.config import settings
+from app.schemas.message import ChannelCapability, ChannelCapabilityManager
+from app.schemas.types import MessageChannel
 
 module_path = Path(__file__).resolve().parents[1] / "app" / "agent" / "llm" / "capability.py"
 spec = importlib.util.spec_from_file_location("test_agent_llm_capability_module", module_path)
@@ -157,6 +159,73 @@ class AgentCapabilityManagerTest(unittest.TestCase):
         self.assertEqual(result, Path("/tmp/reply.opus"))
         provider.synthesize_speech.assert_called_once_with(text="你好")
 
+    def test_native_voice_reply_supports_channels_with_audio_output(self):
+        """校验 Agent 语音回复渠道支持判断覆盖常见渠道写法。"""
+        self.assertTrue(
+            AgentCapabilityManager.supports_native_voice_reply("telegram", None)
+        )
+        self.assertTrue(
+            AgentCapabilityManager.supports_native_voice_reply(
+                MessageChannel.Telegram.value, None
+            )
+        )
+        self.assertTrue(
+            AgentCapabilityManager.supports_native_voice_reply(
+                MessageChannel.Feishu.value, None
+            )
+        )
+        self.assertTrue(
+            AgentCapabilityManager.supports_native_voice_reply("Feishu", None)
+        )
+        self.assertFalse(
+            AgentCapabilityManager.supports_native_voice_reply("Slack", None)
+        )
+
+    def test_native_voice_reply_respects_wechat_mode(self):
+        """校验企业微信只有自建应用模式允许 Agent 语音回复。"""
+        configs = [
+            SimpleNamespace(name="wechat-app", config={"WECHAT_MODE": "app"}),
+            SimpleNamespace(name="wechat-bot", config={"WECHAT_MODE": "bot"}),
+        ]
+
+        with patch(
+            "app.helper.service.ServiceConfigHelper.get_notification_configs",
+            return_value=configs,
+        ):
+            self.assertTrue(
+                AgentCapabilityManager.supports_native_voice_reply(
+                    MessageChannel.Wechat.value, "wechat-app"
+                )
+            )
+            self.assertFalse(
+                AgentCapabilityManager.supports_native_voice_reply(
+                    MessageChannel.Wechat.value, "wechat-bot"
+                )
+            )
+            self.assertFalse(
+                AgentCapabilityManager.supports_native_voice_reply(
+                    MessageChannel.Wechat.value, "missing"
+                )
+            )
+
+    def test_channel_capability_marks_voice_output_channels(self):
+        """校验消息渠道能力显式声明原生语音输出支持。"""
+        for channel in (
+            MessageChannel.Telegram,
+            MessageChannel.Feishu,
+            MessageChannel.Wechat,
+        ):
+            self.assertTrue(
+                ChannelCapabilityManager.supports_capability(
+                    channel, ChannelCapability.AUDIO_OUTPUT
+                )
+            )
+        self.assertFalse(
+            ChannelCapabilityManager.supports_capability(
+                MessageChannel.Slack, ChannelCapability.AUDIO_OUTPUT
+            )
+        )
+
     def test_mimo_tts_uses_chat_completions_audio_payload(self):
         provider = MiMoAudioProvider()
         fake_client = Mock()
@@ -231,6 +300,38 @@ class AgentCapabilityManagerTest(unittest.TestCase):
             content[0]["input_audio"]["data"].startswith("data:audio/wav;base64,")
         )
         self.assertIn("只输出转写结果", content[1]["text"])
+
+    def test_mimo_stt_transcodes_amr_before_payload(self):
+        """校验 MiMo 音频输入会先将企业微信 AMR 转为受支持的 WAV。"""
+        provider = MiMoAudioProvider()
+        fake_client = Mock()
+        fake_client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="你好"))]
+        )
+
+        with patch.object(provider, "_build_client", return_value=fake_client), patch.object(
+            provider,
+            "_convert_audio_for_transcription",
+            return_value=(b"wav-bytes", "input.wav"),
+        ) as convert_audio, patch.object(settings, "AUDIO_INPUT_MODEL", "mimo-v2.5"), patch.object(
+            settings, "AUDIO_INPUT_LANGUAGE", "zh"
+        ), patch.object(
+            settings, "AUDIO_INPUT_API_KEY", "sk-test"
+        ), patch.object(
+            settings, "AUDIO_INPUT_BASE_URL", "https://api.xiaomimimo.com/v1"
+        ):
+            result = provider.transcribe_audio(b"amr-bytes", filename="input.amr")
+
+        self.assertEqual(result, "你好")
+        convert_audio.assert_called_once_with(
+            content=b"amr-bytes", filename="input.amr"
+        )
+        request = fake_client.chat.completions.create.call_args.kwargs
+        content = request["messages"][0]["content"]
+        self.assertEqual(
+            content[0]["input_audio"]["data"],
+            f"data:audio/wav;base64,{b64encode(b'wav-bytes').decode('utf-8')}",
+        )
 
     def test_minimax_stt_normalizes_openai_default_model(self):
         """校验 MiniMax 音频输入会把 OpenAI 默认模型兜底为 MiniMax 模型。"""

@@ -602,6 +602,7 @@ class LLMHelper:
             model_name: str | None,
             api_key: str | None = None,
             base_url: str | None = None,
+            user_agent: str | None = None,
     ) -> dict[str, Any]:
         """
         在 provider 目录不可用时回退到旧的直接构造逻辑。
@@ -625,11 +626,67 @@ class LLMHelper:
             "model_id": model_name,
             "api_key": api_key_value,
             "base_url": base_url_value,
-            "default_headers": None,
+            "default_headers": LLMHelper._build_openai_default_headers(
+                None,
+                user_agent=user_agent,
+            ),
             "use_responses_api": None,
             "model_record": None,
             "model_metadata": None,
         }
+
+    @staticmethod
+    def _build_openai_default_headers(
+            default_headers: dict[str, str] | None = None,
+            user_agent: str | None = None,
+    ) -> dict[str, str] | None:
+        """
+        合并 OpenAI 兼容接口默认请求头。
+
+        :param default_headers: provider 运行时已解析的默认请求头
+        :param user_agent: 用户配置的 User-Agent，非空时写入标准请求头
+        :return: 可传给 OpenAI SDK 的请求头字典
+        """
+        headers = dict(default_headers or {})
+        normalized_user_agent = str(user_agent or "").strip()
+        if normalized_user_agent:
+            for key in list(headers.keys()):
+                if key.lower() == "user-agent":
+                    headers.pop(key)
+            headers["User-Agent"] = normalized_user_agent
+        return headers or None
+
+    @classmethod
+    def _should_use_openai_responses_api(
+            cls,
+            provider: str,
+            model: str | None,
+            runtime: dict[str, Any],
+    ) -> bool | None:
+        """
+        判断官方 ChatGPT API Key 模式是否应使用 Responses API。
+
+        GPT-5/o 系推理模型在 Chat Completions 中组合 function tools 与
+        reasoning_effort 时会被官方端点拒绝，因此 ChatGPT 官方 API Key
+        模式需要显式切到 Responses API；通用 OpenAI-compatible 入口保持
+        provider 目录解析出的默认行为，避免误伤第三方兼容服务。
+        """
+        runtime_use_responses_api = runtime.get("use_responses_api")
+        if runtime_use_responses_api is not None:
+            return bool(runtime_use_responses_api)
+
+        provider_name = (provider or "").strip().lower()
+        if provider_name != "chatgpt":
+            return None
+
+        base_url = str(runtime.get("base_url") or "").strip().lower()
+        if "api.openai.com" not in base_url:
+            return None
+
+        model_name = cls._normalize_model_name(model)
+        if model_name.startswith(("gpt-5", "o1", "o3", "o4")):
+            return True
+        return None
 
     @classmethod
     def _resolve_thinking_level(
@@ -675,6 +732,7 @@ class LLMHelper:
             api_key: str | None = None,
             base_url: str | None = None,
             base_url_preset: str | None = None,
+            user_agent: str | None = None,
     ):
         """
         获取LLM实例
@@ -688,6 +746,7 @@ class LLMHelper:
         :param api_key: API Key。未显式传入时使用当前配置项 LLM_API_KEY。对于某些提供商（如 DeepSeek），可能需要同时提供 base_url。
         :param base_url: API Base URL。未显式传入时使用当前配置项 LLM_BASE_URL。
         :param base_url_preset: Base URL 预设。未显式传入时使用当前配置项 LLM_BASE_URL_PRESET。
+        :param user_agent: OpenAI兼容接口请求 User-Agent。未显式传入时使用配置项 LLM_USER_AGENT。
         :return: LLM实例
         """
         provider_name = str(provider if provider is not None else settings.LLM_PROVIDER).lower()
@@ -697,6 +756,7 @@ class LLMHelper:
         base_url_preset_value = (
             base_url_preset if base_url_preset is not None else settings.LLM_BASE_URL_PRESET
         )
+        user_agent_value = user_agent if user_agent is not None else settings.LLM_USER_AGENT
         normalized_thinking_level = cls._resolve_thinking_level(
             thinking_level=thinking_level,
         )
@@ -711,6 +771,7 @@ class LLMHelper:
                 api_key=api_key_value,
                 base_url=base_url_value,
                 base_url_preset_id=base_url_preset_value,
+                user_agent=user_agent_value,
             )
         except Exception as err:
             logger.debug(f"LLM provider 目录不可用，回退到旧运行时逻辑: {err}")
@@ -719,12 +780,22 @@ class LLMHelper:
                 model_name=model_name,
                 api_key=api_key_value,
                 base_url=base_url_value,
+                user_agent=user_agent_value,
             )
         model_name = runtime.get("model_id") or model_name
+        default_headers = cls._build_openai_default_headers(
+            runtime.get("default_headers"),
+            user_agent=user_agent_value,
+        )
         thinking_kwargs = cls._build_thinking_kwargs(
             provider=provider_name,
             model=model_name,
             thinking_level=normalized_thinking_level,
+        )
+        use_responses_api = cls._should_use_openai_responses_api(
+            provider=provider_name,
+            model=model_name,
+            runtime=runtime,
         )
 
         if runtime["runtime"] == "google":
@@ -776,7 +847,7 @@ class LLMHelper:
                 streaming=streaming,
                 stream_usage=True,
                 anthropic_proxy=settings.PROXY_HOST,
-                default_headers=runtime.get("default_headers"),
+                default_headers=default_headers,
                 **thinking_kwargs,
             )
         else:
@@ -797,8 +868,8 @@ class LLMHelper:
                 streaming=streaming,
                 stream_usage=True,
                 openai_proxy=settings.PROXY_HOST,
-                default_headers=runtime.get("default_headers"),
-                use_responses_api=runtime.get("use_responses_api"),
+                default_headers=default_headers,
+                use_responses_api=use_responses_api,
                 **thinking_kwargs,
             )
 
@@ -873,6 +944,7 @@ class LLMHelper:
             api_key: str | None = None,
             base_url: str | None = None,
             base_url_preset: str | None = None,
+            user_agent: str | None = None,
     ) -> dict:
         """
         使用当前已保存配置执行一次最小 LLM 调用。
@@ -888,6 +960,7 @@ class LLMHelper:
             api_key=api_key,
             base_url=base_url,
             base_url_preset=base_url_preset,
+            user_agent=user_agent,
         )
         try:
             response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=timeout)
@@ -918,6 +991,7 @@ class LLMHelper:
             api_key: str | None = None,
             base_url: str | None = None,
             base_url_preset: str | None = None,
+            user_agent: str | None = None,
             force_refresh: bool = False,
     ) -> List[dict[str, Any]]:
         """
@@ -935,6 +1009,7 @@ class LLMHelper:
                 api_key=api_key,
                 base_url=base_url,
                 base_url_preset_id=base_url_preset,
+                user_agent=user_agent,
                 force_refresh=force_refresh,
             )
         except Exception as err:
@@ -963,6 +1038,7 @@ class LLMHelper:
                     provider,
                     api_key or "",
                     model_list_base_url,
+                    user_agent=user_agent,
                 )
             ]
 
@@ -997,7 +1073,10 @@ class LLMHelper:
 
     @staticmethod
     async def _get_openai_compatible_models(
-            provider: str, api_key: str, base_url: str = None
+            provider: str,
+            api_key: str,
+            base_url: str = None,
+            user_agent: str | None = None,
     ) -> List[str]:
         """获取OpenAI兼容模型列表"""
         try:
@@ -1006,7 +1085,14 @@ class LLMHelper:
             if provider == "deepseek":
                 base_url = base_url or "https://api.deepseek.com"
 
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                default_headers=LLMHelper._build_openai_default_headers(
+                    None,
+                    user_agent=user_agent,
+                ),
+            )
             models = await client.models.list()
             await client.close()
             return [model.id for model in models.data]
