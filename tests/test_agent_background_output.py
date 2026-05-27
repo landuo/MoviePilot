@@ -12,6 +12,7 @@ from app.agent import (
     UNSUPPORTED_IMAGE_INPUT_MESSAGE,
 )
 from app.agent.memory import memory_manager
+from app.agent.tools.factory import MoviePilotToolFactory
 from app.core.config import settings
 from app.utils.identity import SYSTEM_INTERNAL_USER_ID
 
@@ -252,7 +253,7 @@ class AgentBackgroundOutputTest(unittest.IsolatedAsyncioTestCase):
         save_messages.assert_called_once()
         self.assertEqual("后台结果", agent._streamed_output)
 
-    async def test_heartbeat_check_jobs_uses_dispatch_reply_mode(self):
+    async def test_heartbeat_check_jobs_captures_final_reply_and_keeps_message_tools(self):
         manager = AgentManager()
 
         with (
@@ -271,10 +272,10 @@ class AgentBackgroundOutputTest(unittest.IsolatedAsyncioTestCase):
             await manager.heartbeat_check_jobs()
 
         process_message.assert_awaited_once()
-        self.assertEqual(
-            ReplyMode.DISPATCH,
-            process_message.await_args.kwargs["reply_mode"],
-        )
+        kwargs = process_message.await_args.kwargs
+        self.assertEqual(ReplyMode.CAPTURE_ONLY, kwargs["reply_mode"])
+        self.assertFalse(kwargs["persist_output_message"])
+        self.assertTrue(kwargs["allow_message_tools"])
 
     async def test_heartbeat_check_jobs_skips_when_no_active_jobs(self):
         manager = AgentManager()
@@ -319,6 +320,15 @@ class AgentBackgroundOutputTest(unittest.IsolatedAsyncioTestCase):
             ["skills", "jobs", "runtime", "memory", "summary", "patch", "usage"],
             created["middleware"],
         )
+
+    def test_send_message_tool_is_always_included_by_tool_selector(self):
+        send_message_tool = SimpleNamespace(name="send_message")
+
+        always_include = MoviePilotToolFactory.get_tool_selector_always_include_names(
+            [send_message_tool]
+        )
+
+        self.assertIn("send_message", always_include)
 
     async def test_create_agent_keeps_activity_log_for_normal_session(self):
         agent = MoviePilotAgent(session_id="normal-session", user_id="system")

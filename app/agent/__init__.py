@@ -470,6 +470,7 @@ class MoviePilotAgent:
             base_url=settings.LLM_BASE_URL,
             base_url_preset=settings.LLM_BASE_URL_PRESET,
             user_agent=settings.LLM_USER_AGENT,
+            use_proxy=settings.LLM_USE_PROXY,
             thinking_level=None,
         )
         selected_event = await eventmanager.async_send_event(
@@ -502,6 +503,9 @@ class MoviePilotAgent:
                 self._clean_optional_text(self._get_event_value(resolved_data, "user_agent"))
                 or settings.LLM_USER_AGENT
         )
+        use_proxy = self._get_event_value(resolved_data, "use_proxy")
+        if use_proxy is None:
+            use_proxy = settings.LLM_USE_PROXY
         thinking_level = self._clean_optional_text(
             self._get_event_value(resolved_data, "thinking_level")
         )
@@ -528,6 +532,7 @@ class MoviePilotAgent:
             "base_url": base_url,
             "base_url_preset": base_url_preset,
             "user_agent": user_agent,
+            "use_proxy": bool(use_proxy),
             "thinking_level": thinking_level,
         }
         return self._llm_runtime_config
@@ -1187,6 +1192,8 @@ class _MessageTask:
     original_chat_id: Optional[str] = None
     processing_status: Optional[dict] = None
     reply_mode: ReplyMode = ReplyMode.DISPATCH
+    persist_output_message: bool = True
+    allow_message_tools: bool = True
 
 
 class AgentManager:
@@ -1330,6 +1337,8 @@ class AgentManager:
             original_message_id: Optional[str] = None,
             original_chat_id: Optional[str] = None,
             reply_mode: ReplyMode = ReplyMode.DISPATCH,
+            persist_output_message: bool = True,
+            allow_message_tools: bool = True,
     ) -> str:
         """
         处理用户消息：将消息放入会话队列，按顺序依次处理。
@@ -1347,6 +1356,8 @@ class AgentManager:
             original_message_id=original_message_id,
             original_chat_id=original_chat_id,
             reply_mode=reply_mode,
+            persist_output_message=persist_output_message,
+            allow_message_tools=allow_message_tools,
         )
         self._record_session_activity(session_id, user_id)
 
@@ -1456,6 +1467,8 @@ class AgentManager:
                 original_message_id=task.original_message_id,
                 original_chat_id=task.original_chat_id,
                 replay_mode=task.reply_mode,
+                persist_output_message=task.persist_output_message,
+                allow_message_tools=task.allow_message_tools,
             )
             self.active_agents[session_id] = agent
         else:
@@ -1470,6 +1483,8 @@ class AgentManager:
             agent.original_message_id = task.original_message_id
             agent.original_chat_id = task.original_chat_id
             agent.reply_mode = task.reply_mode
+            agent.persist_output_message = task.persist_output_message
+            agent.allow_message_tools = task.allow_message_tools
 
         return await agent.process(task.message, images=task.images, files=task.files)
 
@@ -1607,7 +1622,9 @@ class AgentManager:
                 channel=None,
                 source=None,
                 username=settings.SUPERUSER,
-                reply_mode=ReplyMode.DISPATCH,
+                reply_mode=ReplyMode.CAPTURE_ONLY,
+                persist_output_message=False,
+                allow_message_tools=True,
             )
 
             # 等待消息队列处理完成

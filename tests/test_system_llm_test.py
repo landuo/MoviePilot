@@ -9,14 +9,15 @@ _ORIGINAL_STUBBED_MODULES = {}
 
 
 def _stub_module(name: str, **attrs):
+    """
+    安装临时 stub 模块，并记录原模块用于导入后恢复。
+    """
     if name not in _ORIGINAL_STUBBED_MODULES:
         _ORIGINAL_STUBBED_MODULES[name] = sys.modules.get(name)
-    module = sys.modules.get(name)
-    if module is None:
-        module = ModuleType(name)
-        sys.modules[name] = module
+    module = ModuleType(name)
     for key, value in attrs.items():
         setattr(module, key, value)
+    sys.modules[name] = module
     return module
 
 
@@ -76,7 +77,7 @@ _stub_module("app.helper.mediaserver", MediaServerHelper=_Dummy)
 _stub_module("app.helper.message", MessageHelper=_Dummy)
 _stub_module("app.helper.progress", ProgressHelper=_Dummy)
 _stub_module("app.helper.rule", RuleHelper=_Dummy)
-_stub_module("app.helper.subscribe", SubscribeHelper=_Dummy)
+_stub_module("app.helper.server", MoviePilotServerHelper=_Dummy)
 _stub_module("app.helper.system", SystemHelper=_Dummy)
 _stub_module("app.helper.image", ImageHelper=_Dummy)
 _stub_module("app.scheduler", Scheduler=_Dummy)
@@ -148,6 +149,8 @@ class LlmTestEndpointTest(unittest.TestCase):
         ), patch.object(
             system_endpoint.settings, "LLM_USER_AGENT", "MoviePilot-Test/1.0"
         ), patch.object(
+            system_endpoint.settings, "LLM_USE_PROXY", True
+        ), patch.object(
             system_endpoint.LLMHelper,
             "test_current_settings",
             llm_test_mock,
@@ -163,6 +166,7 @@ class LlmTestEndpointTest(unittest.TestCase):
             base_url="https://api.deepseek.com",
             base_url_preset="deepseek-default",
             user_agent="MoviePilot-Test/1.0",
+            use_proxy=True,
         )
         self.assertTrue(resp.success)
         self.assertEqual(resp.data["provider"], "deepseek")
@@ -188,6 +192,7 @@ class LlmTestEndpointTest(unittest.TestCase):
             base_url="https://example.com/v1",
             base_url_preset="openai-default",
             user_agent="MoviePilot-Custom/1.0",
+            use_proxy=False,
         )
 
         with patch.object(system_endpoint.settings, "AI_AGENT_ENABLE", False), patch.object(
@@ -212,6 +217,7 @@ class LlmTestEndpointTest(unittest.TestCase):
             base_url="https://example.com/v1",
             base_url_preset="openai-default",
             user_agent="MoviePilot-Custom/1.0",
+            use_proxy=False,
         )
         self.assertTrue(resp.success)
         self.assertEqual(resp.data["provider"], "openai")
@@ -234,6 +240,7 @@ class LlmTestEndpointTest(unittest.TestCase):
             base_url="https://api.deepseek.com",
             base_url_preset="deepseek-default",
             user_agent=None,
+            use_proxy=None,
         )
 
         with patch.object(system_endpoint.settings, "AI_AGENT_ENABLE", False), patch.object(
@@ -252,6 +259,7 @@ class LlmTestEndpointTest(unittest.TestCase):
             base_url="https://api.deepseek.com",
             base_url_preset="deepseek-default",
             user_agent=None,
+            use_proxy=None,
         )
         self.assertTrue(resp.success)
 

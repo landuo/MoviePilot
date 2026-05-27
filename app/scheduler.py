@@ -36,7 +36,7 @@ from app.db.systemconfig_oper import SystemConfigOper
 from app.helper.image import WallpaperHelper
 from app.helper.message import MessageHelper
 from app.helper.sites import SitesHelper  # noqa
-from app.helper.usage import UsageHelper
+from app.helper.server import MoviePilotServerHelper
 from app.log import logger
 from app.schemas import Notification, NotificationType, Workflow
 from app.schemas.types import EventType, SystemConfigKey
@@ -405,7 +405,7 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
                 },
                 "usage_report": {
                     "name": "安装版本统计上报",
-                    "func": UsageHelper().report,
+                    "func": MoviePilotServerHelper.report_usage,
                     "running": False,
                 },
             }
@@ -658,7 +658,7 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
                     "interval",
                     id="usage_report",
                     name="安装版本统计上报",
-                    hours=24,
+                    hours=12,
                     kwargs={"job_id": "usage_report"},
                 )
 
