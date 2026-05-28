@@ -146,6 +146,21 @@ MoviePilot 实现了标准的 **Model Context Protocol (MCP)**，允许 AI 智�
 }
 ```
 
+**`search_web` 网络搜索示例**:
+```json
+{
+  "tool_name": "search_web",
+  "arguments": {
+    "query": "asyncio TaskGroup",
+    "search_engine": "duckduckgo",
+    "site_url": "https://docs.python.org/3/",
+    "max_results": 5
+  }
+}
+```
+
+`search_engine` 可选，通过 DDGS 支持 `auto`、`duckduckgo`、`google`、`brave`、`yahoo`、`wikipedia`、`yandex`、`mojeek`。`site_url` 可选，用于限定搜索到指定域名或 URL 路径范围。搜索默认使用系统代理配置。
+
 ### 3. 获取工具详情
 
 **GET** `/api/v1/mcp/tools/{tool_name}`
