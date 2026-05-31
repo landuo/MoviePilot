@@ -36,6 +36,11 @@ from app.agent.middleware.memory import MemoryMiddleware
 from app.agent.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from app.agent.middleware.runtime_config import RuntimeConfigMiddleware
 from app.agent.middleware.skills import SkillsMiddleware
+from app.agent.middleware.subagents import (
+    SUBAGENT_TASK_TOOL_NAME,
+    create_subagent_middlewares,
+    is_subagent_stream_metadata,
+)
 from app.agent.middleware.tool_selection import ToolSelectorMiddleware
 from app.agent.middleware.usage import UsageMiddleware
 from app.agent.prompt import prompt_manager
@@ -774,6 +779,25 @@ class MoviePilotAgent:
             allow_message_tools=self.allow_message_tools,
         )
 
+    def _initialize_subagent_tools(self) -> List:
+        """
+        初始化子代理专用静默工具列表。
+        """
+        return MoviePilotToolFactory.create_tools(
+            session_id=self.session_id,
+            user_id=self.user_id,
+            channel=self.channel,
+            source=self.source,
+            username=self.username,
+            stream_handler=None,
+            agent_context={
+                "user_reply_sent": False,
+                "reply_mode": None,
+                "should_dispatch_reply": False,
+            },
+            allow_message_tools=False,
+        )
+
     async def _create_agent(self, streaming: bool = False):
         """
         创建 LangGraph Agent（使用 create_agent + SummarizationMiddleware）
@@ -796,10 +820,21 @@ class MoviePilotAgent:
 
             # 工具列表
             tools = self._initialize_tools()
+            subagent_middlewares, subagent_task_tools = create_subagent_middlewares(
+                model=non_streaming_model,
+                tools=self._initialize_subagent_tools(),
+                stream_handler=self.stream_handler,
+            )
             max_tools = settings.LLM_MAX_TOOLS
             always_include_tools = (
                 MoviePilotToolFactory.get_tool_selector_always_include_names(tools)
             )
+            if subagent_task_tools:
+                always_include_tools.extend(
+                    tool.name
+                    for tool in subagent_task_tools
+                    if getattr(tool, "name", None) == SUBAGENT_TASK_TOOL_NAME
+                )
 
             # 中间件
             middlewares = [
@@ -822,6 +857,8 @@ class MoviePilotAgent:
                 ),
                 # 错误工具调用修复
                 PatchToolCallsMiddleware(),
+                # 子代理委派
+                *subagent_middlewares,
                 # 用量统计
                 UsageMiddleware(on_usage=self._record_usage),
             ]
@@ -839,7 +876,7 @@ class MoviePilotAgent:
                 middlewares.append(
                     ToolSelectorMiddleware(
                         model=non_streaming_model,
-                        selection_tools=tools,
+                        selection_tools=[*tools, *subagent_task_tools],
                         max_tools=max_tools,
                         always_include=always_include_tools,
                     )
@@ -861,6 +898,7 @@ class MoviePilotAgent:
             message: str,
             images: List[str] = None,
             files: Optional[List[dict]] = None,
+            has_audio_input: bool = False,
     ) -> str:
         """
         处理用户消息，流式推理并返回 Agent 回复
@@ -868,7 +906,8 @@ class MoviePilotAgent:
         try:
             logger.info(
                 f"Agent推理: session_id={self.session_id}, input={message}, "
-                f"images={len(images) if images else 0}, files={len(files) if files else 0}"
+                f"images={len(images) if images else 0}, files={len(files) if files else 0}, "
+                f"audio_input={has_audio_input}"
             )
             self._tool_context = {
                 "user_reply_sent": False,
@@ -885,6 +924,10 @@ class MoviePilotAgent:
             # 构建结构化用户消息内容
             request_payload = {
                 "message": message or "",
+                "input": {
+                    "mode": "voice" if has_audio_input else "text",
+                    "transcribed": bool(has_audio_input),
+                },
                 "images": [
                     {"index": index + 1, "type": "image"}
                     for index, _ in enumerate(images or [])
@@ -936,6 +979,8 @@ class MoviePilotAgent:
         ):
             if chunk["type"] == "messages":
                 token, metadata = chunk["data"]
+                if is_subagent_stream_metadata(metadata):
+                    continue
                 if not token or not hasattr(token, "tool_call_chunks"):
                     continue
 
@@ -1187,6 +1232,7 @@ class _MessageTask:
     message: str
     images: Optional[List[str]] = None
     files: Optional[List[dict]] = None
+    has_audio_input: bool = False
     channel: Optional[str] = None
     source: Optional[str] = None
     username: Optional[str] = None
@@ -1333,6 +1379,7 @@ class AgentManager:
             message: str,
             images: List[str] = None,
             files: Optional[List[dict]] = None,
+            has_audio_input: bool = False,
             channel: str = None,
             source: str = None,
             username: str = None,
@@ -1352,6 +1399,7 @@ class AgentManager:
             message=message,
             images=images,
             files=files,
+            has_audio_input=has_audio_input,
             channel=channel,
             source=source,
             username=username,
@@ -1488,7 +1536,13 @@ class AgentManager:
             agent.persist_output_message = task.persist_output_message
             agent.allow_message_tools = task.allow_message_tools
 
-        return await agent.process(task.message, images=task.images, files=task.files)
+        process_kwargs = {
+            "images": task.images,
+            "files": task.files,
+        }
+        if task.has_audio_input:
+            process_kwargs["has_audio_input"] = True
+        return await agent.process(task.message, **process_kwargs)
 
     async def stop_current_task(self, session_id: str):
         """
@@ -1539,7 +1593,7 @@ class AgentManager:
                 await self._session_workers[session_id]
             except asyncio.CancelledError:
                 pass
-            self._session_workers.pop(session_id, None)
+            self._session_workers.pop(session_id, None)  # noqa
 
         # 清理队列
         self._session_queues.pop(session_id, None)

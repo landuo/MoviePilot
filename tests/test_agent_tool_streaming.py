@@ -9,6 +9,7 @@ if not hasattr(langchain_agents, "create_agent"):
     langchain_agents.create_agent = lambda *args, **kwargs: None
 
 from app.agent.callback import StreamingHandler
+from app.agent.middleware.subagents import is_subagent_stream_metadata
 from app.agent.tools.base import MoviePilotTool
 from app.agent.tools.impl.send_voice_message import SendVoiceMessageTool
 from app.api.endpoints.openai import _OpenAIStreamingHandler
@@ -113,6 +114,36 @@ class TestAgentToolStreaming(unittest.TestCase):
             buffered_message,
             "处理中：\n\n（执行了 2 次搜索，读取了 2 个文件）\n\n继续分析",
         )
+
+    def test_non_verbose_tool_summary_counts_subagents(self):
+        async def _run():
+            handler = StreamingHandler()
+            await handler.start_streaming()
+            handler.emit("处理中：")
+            handler.record_tool_call(
+                tool_name="task",
+                tool_message="Subagent invoked",
+                tool_kwargs={"subagent_type": "media-researcher"},
+            )
+            handler.record_tool_call(
+                tool_name="task",
+                tool_message="Subagent invoked",
+                tool_kwargs={"subagent_type": "resource-searcher"},
+            )
+            return await handler.take()
+
+        buffered_message = asyncio.run(_run())
+
+        self.assertEqual(buffered_message, "处理中：\n\n（已调用 2 个子代理）\n\n")
+
+    def test_subagent_stream_metadata_is_suppressed(self):
+        self.assertTrue(
+            is_subagent_stream_metadata(
+                {"metadata": {"ls_agent_type": "subagent"}}
+            )
+        )
+        self.assertTrue(is_subagent_stream_metadata({"lc_agent_name": "media-researcher"}))
+        self.assertFalse(is_subagent_stream_metadata({"lc_agent_name": "main"}))
 
     def test_openai_streaming_handler_flushes_pending_summary_to_queue(self):
         async def _run():
@@ -406,7 +437,9 @@ class TestAgentToolStreaming(unittest.TestCase):
             """运行指定渠道的语音发送工具。"""
             tool = SendVoiceMessageTool(session_id="session-1", user_id="10001")
             tool.set_message_attr(
-                channel=channel.value, source=f"{channel.name.lower()}-main", username="tester"
+                channel=channel.value,
+                source=f"{channel.name.lower()}-main",
+                username="tester",
             )
 
             with (
@@ -429,7 +462,9 @@ class TestAgentToolStreaming(unittest.TestCase):
             return result, synthesize_speech, async_post_message
 
         for channel in (MessageChannel.Telegram, MessageChannel.Feishu):
-            result, synthesize_speech, async_post_message = asyncio.run(_run(channel))
+            result, synthesize_speech, async_post_message = asyncio.run(
+                _run(channel)
+            )
             notification = async_post_message.await_args.args[0]
 
             self.assertEqual(result, "语音回复已发送")
@@ -437,6 +472,9 @@ class TestAgentToolStreaming(unittest.TestCase):
             self.assertEqual(notification.channel, channel)
             self.assertEqual(notification.voice_path, "/tmp/reply.opus")
             self.assertEqual(notification.voice_caption, "你好")
+            voice_tool = SendVoiceMessageTool(session_id="session-1", user_id="10001")
+            self.assertTrue(voice_tool.return_direct)
+            self.assertIn("terminal response tool", voice_tool.description)
 
     def test_send_voice_message_falls_back_for_unsupported_channels(self):
         """校验不支持语音输出的渠道继续回退为文字消息。"""

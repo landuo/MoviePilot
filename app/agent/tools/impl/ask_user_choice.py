@@ -5,6 +5,7 @@ from typing import List, Optional, Type
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.tools.base import MoviePilotTool, ToolChain
+from app.agent.tools.tags import ToolTag
 from app.helper.interaction import (
     AgentInteractionOption,
     agent_interaction_manager,
@@ -67,11 +68,19 @@ class AskUserChoiceTool(MoviePilotTool):
     """发送按钮选择并让当前 Agent 轮次等待用户回调消息。"""
 
     name: str = "ask_user_choice"
+    tags: list[str] = [
+        ToolTag.Write,
+        ToolTag.Message,
+        ToolTag.UserInteraction,
+        ToolTag.TerminalResponse,
+    ]
     sends_message: bool = True
     return_direct: bool = True
     description: str = (
         "Ask the user to choose from button options on channels that support interactive buttons. "
-        "After the user clicks a button, the selected value will come back as the user's next message."
+        "This is a terminal interaction tool: put the full question and all options in this call, "
+        "then stop the current turn. After the user clicks a button, the selected value will come "
+        "back as the user's next message. Do not also send the same question as plain text."
     )
     args_schema: Type[BaseModel] = AskUserChoiceInput
     require_admin: bool = False

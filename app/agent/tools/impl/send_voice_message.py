@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.llm.capability import AgentCapabilityManager
 from app.agent.tools.base import MoviePilotTool, ToolChain
+from app.agent.tools.tags import ToolTag
 from app.core.config import settings
 from app.log import logger
 from app.schemas import Notification, NotificationType
@@ -29,12 +30,20 @@ class SendVoiceMessageTool(MoviePilotTool):
     """发送 Agent 语音回复的工具。"""
 
     name: str = "send_voice_message"
+    tags: list[str] = [
+        ToolTag.Write,
+        ToolTag.Message,
+        ToolTag.TerminalResponse,
+    ]
     sends_message: bool = True
+    return_direct: bool = True
     description: str = (
         "Send a voice reply to the current user. Use this only when the user explicitly asks for "
         "a voice reply or when spoken playback is clearly better than plain text. On channels "
         "without voice support or when TTS is unavailable, it automatically falls back to sending "
-        "the same content as plain text."
+        "the same content as plain text. This is a terminal response tool: put the complete "
+        "user-facing reply in `message`; after this tool runs, do not send another text reply "
+        "or call `send_message` with the same content."
     )
     args_schema: Type[BaseModel] = SendVoiceMessageInput
     require_admin: bool = False
