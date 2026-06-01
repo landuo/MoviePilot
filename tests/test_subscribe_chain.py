@@ -158,6 +158,14 @@ def _load_subscribe_chain_class():
             self.convert_type = kwargs.get("convert_type")
             self.media_dict = kwargs.get("media_dict")
 
+    class _SubscribeEpisodesRefreshEventData:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _SubscribeCompletionCheckEventData:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
     schemas_module.Notification = _Notification
     schemas_module.Subscribe = _SubscribeSchema
     schemas_module.NotExistMediaInfo = _NotExistMediaInfo
@@ -166,6 +174,8 @@ def _load_subscribe_chain_class():
     schemas_module.SubscribeDownloadFileInfo = _SubscribeDownloadFileInfo
     schemas_module.SubscribeLibraryFileInfo = _SubscribeLibraryFileInfo
     schemas_module.MediaRecognizeConvertEventData = _MediaRecognizeConvertEventData
+    schemas_module.SubscribeEpisodesRefreshEventData = _SubscribeEpisodesRefreshEventData
+    schemas_module.SubscribeCompletionCheckEventData = _SubscribeCompletionCheckEventData
 
     logger_module = ensure_module("app.log", types.ModuleType("app.log"))
 
