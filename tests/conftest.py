@@ -1,16 +1,14 @@
-"""pytest 全局引导：在 import 任何测试模块前把 CONFIG_DIR 指向临时目录并建表，隔离真实库。"""
-import atexit
-import os
-import shutil
-import tempfile
+"""pytest 全局引导：隔离 CONFIG_DIR、补 sites 垫片、建表、装载网络守卫。
 
-# 必须早于首个 import app.*：app.db 在导入时即按 CONFIG_PATH 连接 user.db
-if not os.environ.get("CONFIG_DIR"):
-    _isolated_config_dir = tempfile.mkdtemp(prefix="mp-test-config-")
-    os.environ["CONFIG_DIR"] = _isolated_config_dir
-    atexit.register(shutil.rmtree, _isolated_config_dir, ignore_errors=True)
+引导与网络守卫均复用 ``app/testing`` 的共享 harness（与插件仓 conftest 同源），
+引导逻辑只在 ``app/testing`` 维护一处。
+"""
+# 必须早于首个 import app.db（其在 import 期即按 CONFIG_PATH 连库）：prepare_backend 内部
+# 先隔离 CONFIG_DIR、补 app.helper.sites 垫片，再建表。app/testing 仅依赖标准库、import 不连库，
+# 故此处先 import 再调用是安全的。
+from app.testing.bootstrap import prepare_backend
 
-# 必须在 CONFIG_DIR 设好之后再 import；空库会让运行期查表报 no such table，故建表
-from app.db.init import init_db  # noqa: E402
+prepare_backend()
 
-init_db()
+# 复用共享 autouse 网络守卫；同一实现亦供各插件仓 conftest import 复用，避免逐仓维护
+from app.testing.network_guard import block_real_network  # noqa: E402,F401

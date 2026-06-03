@@ -298,6 +298,20 @@ class MessageChain(ChainBase):
             )
             return bool(processing_status)
 
+        if text.lower().startswith("/ai"):
+            return self._handle_ai_message(
+                text=text,
+                channel=channel,
+                source=source,
+                userid=userid,
+                username=username,
+                original_message_id=original_message_id,
+                original_chat_id=original_chat_id,
+                images=images,
+                files=files,
+                has_audio_input=has_audio_input,
+            )
+
         latest_slash_interaction = self._get_latest_slash_interaction(userid)
         if latest_slash_interaction == "sites":
             if SiteChain().handle_text_interaction(
@@ -338,20 +352,6 @@ class MessageChain(ChainBase):
                     text=text,
             ):
                 return False
-
-        if text.lower().startswith("/ai"):
-            return self._handle_ai_message(
-                text=text,
-                channel=channel,
-                source=source,
-                userid=userid,
-                username=username,
-                original_message_id=original_message_id,
-                original_chat_id=original_chat_id,
-                images=images,
-                files=files,
-                has_audio_input=has_audio_input,
-            )
 
         if (
                 settings.AI_AGENT_ENABLE
@@ -839,8 +839,9 @@ class MessageChain(ChainBase):
             source_path = src_fileitem.get("path") if isinstance(src_fileitem, dict) else ""
             source_path = source_path or his.src or ""
             season_episode = f"{his.seasons or ''}{his.episodes or ''}".strip()
+            # 键名必须与 System Tasks.yaml 中 manual_transfer_redo 模板的占位符一致
             template_context = {
-                "his_id": his.id,
+                "history_id": his.id,
                 "current_status": "success" if his.status else "failed",
                 "recognized_title": his.title or "unknown",
                 "media_type": his.type or "unknown",

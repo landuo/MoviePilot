@@ -6,7 +6,6 @@ from langchain_core.messages import AIMessage
 
 from app.agent import MoviePilotAgent
 from app.agent.memory import memory_manager
-from app.plugins.agenttokens import AgentTokens
 from app.schemas.types import ChainEventType, EventType
 
 
@@ -41,31 +40,6 @@ class _FakeFailingAgent(_FakeAgent):
 
 
 class AgentTokensEventsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_plugin_sidebar_nav_respects_config(self):
-        """插件侧边栏入口应受 show_sidebar_nav 配置控制。"""
-        plugin = AgentTokens()
-
-        with patch.object(plugin, "update_config"):
-            plugin.init_plugin(
-                {
-                    "enabled": True,
-                    "show_sidebar_nav": False,
-                    "providers": [],
-                }
-            )
-            self.assertEqual([], plugin.get_sidebar_nav())
-
-            plugin.init_plugin(
-                {
-                    "enabled": True,
-                    "show_sidebar_nav": True,
-                    "providers": [],
-                }
-            )
-            nav = plugin.get_sidebar_nav()
-
-        self.assertEqual("Agent Tokens 管理", nav[0]["title"])
-
     async def test_initialize_llm_uses_chain_event_selection(self):
         """Agent 初始化 LLM 时应优先使用链式事件返回的供应商配置。"""
         agent = MoviePilotAgent(session_id="agent-tokens-test", user_id="user-1")

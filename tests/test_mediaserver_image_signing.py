@@ -1,18 +1,5 @@
-import sys
 import unittest
 from unittest.mock import Mock
-
-for _module_name in (
-    "app.chain.mediaserver",
-    "app.db.models",
-    "app.db.user_oper",
-    "app.helper.message",
-    "app.utils.crypto",
-):
-    if _module_name in sys.modules and not hasattr(
-        sys.modules[_module_name], "__file__"
-    ):
-        del sys.modules[_module_name]
 
 from app.chain.mediaserver import MediaServerChain
 from app.schemas import MediaServerLibrary, MediaServerPlayItem
@@ -76,7 +63,3 @@ class MediaServerImageSigningTest(unittest.TestCase):
         result = chain.get_latest_wallpapers()
 
         self.assertEqual(SecurityUtils.verify_signed_url(result[0]), wallpaper)
-
-
-if __name__ == "__main__":
-    unittest.main()
