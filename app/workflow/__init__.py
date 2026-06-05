@@ -237,18 +237,33 @@ class WorkFlowManager(metaclass=Singleton):
         """
         获取所有动作
         """
-        return [
-            {
+        actions = []
+        for key, action in self._actions.items():
+            action_data = action.data
+            for _ in range(3):
+                if isinstance(action_data, property):
+                    action_data = action_data.fget(action)
+                elif callable(action_data):
+                    action_func = getattr(action_data, "__func__", None)
+                    if isinstance(action_func, property):
+                        action_data = action_func.fget(action)
+                    else:
+                        action_data = action_data()
+                else:
+                    break
+            if not isinstance(action_data, dict):
+                action_data = {}
+            actions.append({
                 "type": key,
                 "name": action.name,
                 "description": action.description,
                 "contract": action.get_contract(),
                 "data": {
                     "label": action.name,
-                    **action.data
+                    **action_data
                 }
-            } for key, action in self._actions.items()
-        ]
+            })
+        return actions
 
     def get_action_contract(self, action_type: str) -> dict:
         """

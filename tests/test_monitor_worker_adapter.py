@@ -47,6 +47,27 @@ from app.schemas.worker import WorkerCallError  # noqa: E402
 
 # ----- fixtures -----
 
+
+class _WorkerCallbackStubMixin:
+    """将 monitor_worker 绑定到本文件的 worker_callback stub。"""
+
+    def setUp(self):
+        """在每个用例前替换 worker_callback 注册函数。"""
+        super().setUp()
+        cb_mod = sys.modules["app.api.endpoints.worker_callback"]
+        cb_mod._registered.clear()
+        register_patcher = patch.object(
+            monitor_worker, "register_handler", cb_mod.register_handler
+        )
+        unregister_patcher = patch.object(
+            monitor_worker, "unregister_handler", cb_mod.unregister_handler
+        )
+        register_patcher.start()
+        unregister_patcher.start()
+        self.addCleanup(register_patcher.stop)
+        self.addCleanup(unregister_patcher.stop)
+
+
 class _FakeMonDir:
     """模拟 schemas.TransferDirectoryConf 的最小子集"""
 
@@ -115,15 +136,14 @@ class IsValidLocalMonitorDirTest(unittest.TestCase):
         self.assertFalse(monitor_worker._is_valid_local_monitor_dir(d))
 
 
-class TryConfigureWatcherTest(unittest.TestCase):
+class TryConfigureWatcherTest(_WorkerCallbackStubMixin, unittest.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.events = []
         self.on_event = lambda text, path, size, ev: self.events.append(
             (text, path, size, ev)
         )
-        # 每个用例开始时清空 stub 注册表
-        sys.modules["app.api.endpoints.worker_callback"]._registered.clear()
 
     def test_returns_empty_when_no_local_dirs(self):
         with patch.object(monitor_worker, "WorkerClientManager") as mgr:
@@ -221,7 +241,7 @@ class TryConfigureWatcherTest(unittest.TestCase):
         self.assertEqual(watches[0]["watch_id"], "local::/data/keep")
 
 
-class ReleaseWatcherTest(unittest.TestCase):
+class ReleaseWatcherTest(_WorkerCallbackStubMixin, unittest.TestCase):
 
     def test_unregisters(self):
         cb_mod = sys.modules["app.api.endpoints.worker_callback"]
@@ -236,10 +256,11 @@ class ReleaseWatcherTest(unittest.TestCase):
         monitor_worker.release_watcher()
 
 
-class CallbackHandlerTest(unittest.TestCase):
+class CallbackHandlerTest(_WorkerCallbackStubMixin, unittest.TestCase):
     """通过完整链路测试 _make_callback_handler：try_configure_watcher 注册后触发"""
 
     def setUp(self):
+        super().setUp()
         self.events = []
         self.on_event = lambda text, path, size, ev: self.events.append({
             "text": text, "path": path, "size": size,
