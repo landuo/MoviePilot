@@ -74,6 +74,47 @@ MoviePilot 实现了标准的 **Model Context Protocol (MCP)**，允许 AI 智�
 ## 6. RESTful API
 所有工具相关的API端点都在 `/api/v1/mcp` 路径下（保持向后兼容）。
 
+### 相关 REST 端点
+
+MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所有接口同样需要 API KEY 认证，在请求头中添加 `X-API-KEY: <api_key>` 或在查询参数中添加 `apikey=<api_key>`。
+
+#### 搜索 / 种子 / 字幕
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/search/media/{mediaid}` | 按媒体 ID 搜索站点种子资源，`mediaid` 支持 `tmdb:123`、`douban:123`、`bangumi:123`，参数：`mtype`、`area`、`title`、`year`、`season`、`sites` |
+| GET | `/api/v1/search/media/{mediaid}/stream` | 按媒体 ID 渐进式搜索站点种子资源，返回 SSE，参数同上 |
+| GET | `/api/v1/search/title` | 按关键字模糊搜索站点种子资源，参数：`keyword`、`page`、`sites` |
+| GET | `/api/v1/search/title/stream` | 按关键字渐进式搜索站点种子资源，返回 SSE，参数：`keyword`、`page`、`sites` |
+| GET | `/api/v1/search/subtitle/title` | 按关键字搜索站点字幕资源，参数：`keyword`、`page`、`sites` |
+| GET | `/api/v1/search/subtitle/title/stream` | 按关键字渐进式搜索站点字幕资源，返回 SSE，参数：`keyword`、`page`、`sites` |
+| GET | `/api/v1/search/subtitle/media/{mediaid}` | 按媒体 ID 精确搜索站点字幕资源，`mediaid` 支持 `tmdb:123`、`douban:123`、`bangumi:123`，参数：`mtype`、`title`、`year`、`season`、`episode`、`sites` |
+| GET | `/api/v1/search/subtitle/media/{mediaid}/stream` | 按媒体 ID 渐进式精确搜索站点字幕资源，返回 SSE，参数同上 |
+| GET | `/api/v1/search/last` | 获取上一次种子搜索结果 |
+| GET | `/api/v1/search/last/context` | 获取上一次搜索结果及可复用搜索参数，`params.result_type` 为 `torrent` 或 `subtitle` |
+| POST | `/api/v1/search/recommend` | 获取 AI 推荐资源，请求体：`filtered_indices`、`check_only`、`force` |
+
+#### 下载
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/download/` | 查询正在下载的任务，参数：`name` |
+| POST | `/api/v1/download/` | 添加含媒体信息的下载任务，请求体包含媒体信息和种子信息 |
+| POST | `/api/v1/download/add` | 添加不含媒体信息的下载任务，请求体包含 `torrent_in`，可选 `tmdbid`、`doubanid`、`downloader`、`save_path` |
+| POST | `/api/v1/download/subtitle` | 下载字幕到识别出的媒体下载目录，请求体包含 `subtitle_in`，可选 `tmdbid`、`doubanid`、`save_path` |
+| GET | `/api/v1/download/start/{hashString}` | 恢复下载任务，参数：`name` |
+| GET | `/api/v1/download/stop/{hashString}` | 暂停下载任务，参数：`name` |
+| GET | `/api/v1/download/clients` | 查询可用下载器 |
+| GET | `/api/v1/download/paths` | 查询可用于下载接口 `save_path` 参数的下载路径 |
+| DELETE | `/api/v1/download/{hashString}` | 删除下载任务，参数：`name` |
+
+#### 系统
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/system/ping` | 登录用户服务存活检测，用于前端重启后轮询恢复状态 |
+| GET | `/api/v1/system/setting/public/{key}` | 登录用户读取白名单内非敏感系统设置，仅支持目录、存储、站点范围、默认订阅规则、Follow 订阅者和插件市场地址等前端必需配置 |
+
 ### 插件补充接口
 
 **GET** `/api/v1/plugin/history/{plugin_id}`

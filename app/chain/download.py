@@ -2,15 +2,17 @@ import base64
 import copy
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Set, Dict, Union
 
 from app import schemas
 from app.chain import ChainBase
+from app.chain.storage import StorageChain
 from app.core.cache import FileCache
 from app.core.config import settings, global_vars
-from app.core.context import MediaInfo, TorrentInfo, Context
+from app.core.context import MediaInfo, SubtitleInfo, TorrentInfo, Context
 from app.core.event import eventmanager, Event
 from app.core.meta import MetaBase
 from app.core.metainfo import MetaInfo
@@ -26,12 +28,309 @@ from app.schemas.types import MediaType, TorrentStatus, EventType, MessageChanne
     ChainEventType
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
+from app.utils.system import SystemUtils
 
 
 class DownloadChain(ChainBase):
     """
     下载处理链
     """
+
+    _SUBTITLE_ARCHIVE_FORMATS = {
+        ".zip": "zip",
+        ".rar": "rar",
+    }
+
+    @staticmethod
+    def _safe_subtitle_file_name(file_name: str, fallback_name: str) -> str:
+        """
+        生成安全的字幕文件名。
+        """
+        file_name = Path(file_name or fallback_name).name
+        if not Path(file_name).suffix and Path(fallback_name).suffix:
+            file_name = f"{file_name}{Path(fallback_name).suffix}"
+        return file_name
+
+    @staticmethod
+    def _is_subtitle_archive(file_name: str) -> bool:
+        """
+        判断是否为字幕压缩包。
+        """
+        return Path(file_name).suffix.lower() in DownloadChain._SUBTITLE_ARCHIVE_FORMATS
+
+    @classmethod
+    def _subtitle_archive_format(cls, file_name: str) -> Optional[str]:
+        """
+        获取字幕压缩包格式。
+        """
+        return cls._SUBTITLE_ARCHIVE_FORMATS.get(Path(file_name).suffix.lower())
+
+    @staticmethod
+    def _is_subtitle_file(file_name: str) -> bool:
+        """
+        判断是否为支持的字幕文件。
+        """
+        return Path(file_name).suffix.lower() in settings.RMT_SUBEXT
+
+    @classmethod
+    def _get_subtitle_working_dir(
+            cls,
+            storage_chain: StorageChain,
+            storage: str,
+            target_path: Path,
+    ) -> Tuple[Optional[schemas.FileItem], str]:
+        """
+        获取字幕保存目录，返回失败原因供前端展示。
+        """
+        try:
+            working_dir_item = storage_chain.get_folder(storage, target_path)
+        except Exception as err:
+            message = f"下载目录获取失败，无法保存字幕：{target_path} - {str(err)}"
+            logger.error(message)
+            return None, message
+
+        if not working_dir_item:
+            message = f"下载目录不存在，无法保存字幕：{target_path}"
+            logger.error(message)
+            return None, message
+        return working_dir_item, ""
+
+    @staticmethod
+    def _detect_subtitle_fallback_name(subtitle: SubtitleInfo, content: bytes) -> str:
+        """
+        根据响应内容生成兜底字幕文件名。
+        """
+        suffix = ".zip" if content.startswith(b"PK") else ".srt"
+        return f"{subtitle.title or subtitle.subtitle_id or 'subtitle'}{suffix}"
+
+    @staticmethod
+    def _resolve_media_download_dir(
+            media_info: MediaInfo,
+            save_path: Optional[str] = None,
+    ) -> Union[str, Path]:
+        """
+        根据媒体信息解析下载目录。
+        """
+        storage = 'local'
+        if save_path:
+            return storage, Path(save_path)
+
+        dir_info = DirectoryHelper().get_dir(media_info, include_unsorted=True)
+        storage = dir_info.storage if dir_info else storage
+        if not dir_info:
+            logger.error(f"未找到下载目录：{media_info.type.value} {media_info.title_year}")
+            return None
+
+        if not dir_info.media_type and dir_info.download_type_folder:
+            download_dir = Path(dir_info.download_path) / media_info.type.value
+        else:
+            download_dir = Path(dir_info.download_path)
+
+        if not dir_info.media_category and dir_info.download_category_folder and media_info.category:
+            download_dir = download_dir / media_info.category
+
+        return storage, download_dir
+
+    @staticmethod
+    def _upload_subtitle_file(
+            storage_chain: StorageChain,
+            storage: str,
+            working_dir_item: schemas.FileItem,
+            subtitle_file: Path,
+    ) -> Tuple[Optional[str], str]:
+        """
+        上传单个字幕文件到目标目录。
+        """
+        target_sub_file = Path(working_dir_item.path) / subtitle_file.name
+        if storage_chain.get_file_item(storage, target_sub_file):
+            logger.info(f"字幕文件已存在：{target_sub_file}")
+            return target_sub_file.as_posix(), ""
+        logger.info(f"转移字幕 {subtitle_file} 到 {target_sub_file} ...")
+        uploaded = storage_chain.upload_file(working_dir_item, subtitle_file)
+        if uploaded:
+            return uploaded.path, ""
+        message = f"保存字幕文件失败：{target_sub_file}"
+        logger.error(message)
+        return None, message
+
+    @staticmethod
+    def _build_subtitle_download_error(response) -> str:
+        """
+        从字幕下载响应中提取前端可展示的失败原因。
+        """
+        status_code = getattr(response, "status_code", None)
+        reason = getattr(response, "reason", "") or ""
+        message = "下载字幕文件失败"
+        if status_code:
+            message = f"{message}，状态码：{status_code}"
+            if reason:
+                message = f"{message} {reason}"
+        try:
+            response_text = (getattr(response, "text", "") or "").strip()
+            response_text = re.sub(r"\s+", " ", response_text)
+            if response_text:
+                message = f"{message}：{response_text[:200]}"
+        except Exception as err:
+            logger.debug(f"读取字幕下载失败响应内容失败：{str(err)}")
+        return message
+
+    def _save_subtitle_response(
+            self,
+            subtitle: SubtitleInfo,
+            response,
+            storage: str,
+            target_dir: Path,
+    ) -> Tuple[bool, str, List[str]]:
+        """
+        保存字幕下载响应到目标目录。
+        """
+        fallback_name = self._detect_subtitle_fallback_name(subtitle, response.content)
+        file_name = subtitle.file_name or TorrentHelper.get_url_filename(response, subtitle.enclosure)
+        if not Path(file_name).suffix:
+            file_name = fallback_name
+        file_name = self._safe_subtitle_file_name(
+            file_name=file_name,
+            fallback_name=fallback_name,
+        )
+        if not self._is_subtitle_archive(file_name) and not self._is_subtitle_file(file_name):
+            message = f"下载链接不是支持的字幕文件：{file_name}"
+            logger.warn(f"{message}，链接：{subtitle.enclosure}")
+            return False, message, []
+
+        storage_chain = StorageChain()
+        working_dir_item, message = self._get_subtitle_working_dir(
+            storage_chain=storage_chain,
+            storage=storage,
+            target_path=target_dir,
+        )
+        if not working_dir_item:
+            return False, message, []
+
+        saved_files = []
+        temp_file = settings.TEMP_PATH / file_name
+        temp_extract_dir = temp_file.with_name(temp_file.stem)
+        try:
+            settings.TEMP_PATH.mkdir(parents=True, exist_ok=True)
+            temp_file.write_bytes(response.content)
+            if self._is_subtitle_archive(file_name):
+                try:
+                    SystemUtils.unpack_archive(
+                        temp_file,
+                        temp_extract_dir,
+                        archive_format=self._subtitle_archive_format(file_name),
+                    )
+                except Exception as err:
+                    message = f"字幕压缩包解压失败：{str(err)}"
+                    logger.error(f"{message}，文件：{temp_file}")
+                    return False, message, []
+                for sub_file in SystemUtils.list_files(temp_extract_dir, settings.RMT_SUBEXT):
+                    uploaded_path, message = self._upload_subtitle_file(
+                        storage_chain=storage_chain,
+                        storage=storage,
+                        working_dir_item=working_dir_item,
+                        subtitle_file=sub_file,
+                    )
+                    if uploaded_path:
+                        saved_files.append(uploaded_path)
+                    elif message:
+                        logger.error(message)
+            else:
+                uploaded_path, message = self._upload_subtitle_file(
+                    storage_chain=storage_chain,
+                    storage=storage,
+                    working_dir_item=working_dir_item,
+                    subtitle_file=temp_file,
+                )
+                if uploaded_path:
+                    saved_files.append(uploaded_path)
+                elif message:
+                    return False, message, []
+            if not saved_files:
+                message = "未保存任何字幕文件"
+                logger.error(message)
+                return False, message, []
+            return True, "字幕文件保存成功", saved_files
+        except Exception as err:
+            message = f"保存字幕文件失败：{str(err)}"
+            logger.error(message)
+            return False, message, []
+        finally:
+            try:
+                if temp_extract_dir.exists():
+                    shutil.rmtree(temp_extract_dir)
+                if temp_file.exists():
+                    temp_file.unlink()
+            except Exception as err:
+                logger.error(f"删除临时字幕文件失败：{str(err)}")
+
+    def download_subtitle(
+            self,
+            subtitle: SubtitleInfo,
+            tmdbid: Optional[int] = None,
+            doubanid: Optional[str] = None,
+            save_path: Optional[str] = None,
+            username: Optional[str] = None,
+    ) -> Tuple[bool, str, List[str]]:
+        """
+        下载字幕文件并保存到媒体对应的下载目录。
+
+        :param subtitle: 字幕搜索结果
+        :param tmdbid: TMDB ID
+        :param doubanid: 豆瓣 ID
+        :param save_path: 保存路径
+        :param username: 调用下载的用户名
+        :return: 成功状态、提示消息、保存文件列表
+        """
+        if not subtitle or not subtitle.enclosure:
+            return False, "字幕下载链接为空", []
+
+        metainfo = MetaInfo(title=subtitle.title, subtitle=subtitle.description)
+        mediainfo = self.recognize_media(
+            meta=metainfo,
+            tmdbid=tmdbid,
+            doubanid=doubanid,
+        )
+        if not mediainfo:
+            return False, "无法识别媒体信息", []
+
+        storage, target_dir = self._resolve_media_download_dir(
+            media_info=mediainfo,
+            save_path=save_path,
+        )
+        if not target_dir:
+            return False, "未找到下载目录", []
+
+        request = RequestUtils(
+            cookies=subtitle.site_cookie,
+            ua=subtitle.site_ua or settings.USER_AGENT,
+            proxies=settings.PROXY if subtitle.site_proxy else None,
+        )
+        try:
+            response = request.get_res(subtitle.enclosure, raise_exception=True)
+        except Exception as err:
+            message = f"下载字幕文件失败：{str(err)}"
+            logger.error(message)
+            return False, message, []
+        if response is None:
+            return False, "下载字幕文件失败：未收到站点响应", []
+        if response.status_code != 200:
+            message = self._build_subtitle_download_error(response)
+            logger.error(message)
+            return False, message, []
+
+        success, message, saved_files = self._save_subtitle_response(
+            subtitle=subtitle,
+            response=response,
+            storage=storage,
+            target_dir=target_dir,
+        )
+        if not success:
+            return False, message, []
+
+        logger.info(
+            f"{mediainfo.title_year} 字幕下载完成：{subtitle.site_name} - {subtitle.title}，用户：{username}"
+        )
+        return True, "字幕下载成功", saved_files
 
     def _submit_download_added_task(
             self,
@@ -50,8 +349,8 @@ class DownloadChain(ChainBase):
                     download_dir=download_dir,
                     torrent_content=torrent_content,
                 )
-            except Exception as err:
-                logger.error(f"执行下载成功后处理失败：{str(err)}")
+            except Exception as e:
+                logger.error(f"执行下载成功后处理失败：{str(e)}")
 
         try:
             ThreadHelper().submit(_run_download_added)

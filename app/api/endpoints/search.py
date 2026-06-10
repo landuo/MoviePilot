@@ -29,6 +29,15 @@ def _parse_site_list(sites: Optional[str]) -> Optional[List[int]]:
     return [int(site) for site in sites.split(",") if site] if sites else None
 
 
+def _parse_media_type(mtype: Optional[str]) -> Optional[MediaType]:
+    """
+    解析媒体类型，兼容前端和 Agent 使用的 movie/tv 取值。
+    """
+    if not mtype:
+        return None
+    return MediaType.from_agent(mtype) or MediaType(mtype)
+
+
 def _sse_event(data: dict) -> str:
     """
     转换为SSE事件
@@ -150,13 +159,16 @@ async def search_latest_context(_: schemas.TokenPayload = Depends(verify_token))
     查询上次搜索结果及其对应的搜索参数。
     """
     search_chain = SearchChain()
-    torrents = await search_chain.async_last_search_results() or []
     params = await search_chain.async_last_search_params() or {}
+    if params.get("result_type") == "subtitle":
+        results = await search_chain.async_last_subtitle_search_results() or []
+    else:
+        results = await search_chain.async_last_search_results() or []
     return schemas.Response(
         success=True,
         data={
             "params": params,
-            "results": [torrent.to_dict() for torrent in torrents],
+            "results": [result.to_dict() for result in results],
         },
     )
 
@@ -177,7 +189,7 @@ async def search_by_id_stream(
     根据TMDBID/豆瓣ID渐进式搜索站点资源，返回格式为SSE
     """
 
-    media_type = MediaType(mtype) if mtype else None
+    media_type = _parse_media_type(mtype)
     media_season = int(season) if season else None
     site_list = _parse_site_list(sites)
     media_chain = MediaChain()
@@ -383,10 +395,7 @@ async def search_by_id(
     """
     根据TMDBID/豆瓣ID精确搜索站点资源 tmdb:/douban:/bangumi:
     """
-    if mtype:
-        media_type = MediaType(mtype)
-    else:
-        media_type = None
+    media_type = _parse_media_type(mtype)
     if season:
         media_season = int(season)
     else:
@@ -597,6 +606,233 @@ async def search_by_title(
         return schemas.Response(success=False, message="未搜索到任何资源")
     return schemas.Response(
         success=True, data=[torrent.to_dict() for torrent in torrents]
+    )
+
+
+@router.get("/subtitle/title/stream", summary="渐进式模糊搜索字幕")
+async def search_subtitle_by_title_stream(
+    request: Request,
+    keyword: Optional[str] = None,
+    page: Optional[int] = 0,
+    sites: Optional[str] = None,
+    _: schemas.TokenPayload = Depends(verify_resource_token),
+) -> Any:
+    """
+    根据名称渐进式模糊搜索站点字幕资源，返回格式为SSE。
+    """
+
+    event_source = SearchChain().async_search_subtitles_by_title_stream(
+        title=keyword, page=page, sites=_parse_site_list(sites), cache_local=True
+    )
+    return StreamingResponse(
+        _stream_search_events(request, event_source), media_type="text/event-stream"
+    )
+
+
+@router.get("/subtitle/title", summary="模糊搜索字幕", response_model=schemas.Response)
+async def search_subtitle_by_title(
+    keyword: Optional[str] = None,
+    page: Optional[int] = 0,
+    sites: Optional[str] = None,
+    _: schemas.TokenPayload = Depends(verify_token),
+) -> Any:
+    """
+    根据名称模糊搜索站点字幕资源，支持分页。
+    """
+    subtitles = await SearchChain().async_search_subtitles_by_title(
+        title=keyword, page=page, sites=_parse_site_list(sites), cache_local=True
+    )
+    if not subtitles:
+        return schemas.Response(success=False, message="未搜索到任何字幕")
+    return schemas.Response(
+        success=True, data=[subtitle.to_dict() for subtitle in subtitles]
+    )
+
+
+async def _build_subtitle_search_source(
+    mediaid: str,
+    mtype: Optional[str] = None,
+    title: Optional[str] = None,
+    year: Optional[str] = None,
+    season: Optional[str] = None,
+    episode: Optional[str] = None,
+    sites: Optional[str] = None,
+    stream: bool = False,
+) -> Any:
+    """
+    根据媒体ID构建字幕精确搜索调用，兼容多种媒体ID来源。
+    """
+    media_type = _parse_media_type(mtype)
+    media_season = int(season) if season else None
+    media_episode = int(episode) if episode else None
+    site_list = _parse_site_list(sites)
+    media_chain = MediaChain()
+    search_chain = SearchChain()
+
+    def call_search(**kwargs):
+        """
+        根据调用模式返回普通搜索协程或流式搜索迭代器。
+        """
+        params = {
+            **kwargs,
+            "mtype": media_type,
+            "season": media_season,
+            "episode": media_episode,
+            "sites": site_list,
+            "cache_local": True,
+        }
+        if stream:
+            return search_chain.async_search_subtitles_by_id_stream(**params)
+        return search_chain.async_search_subtitles_by_id(**params)
+
+    if mediaid.startswith("tmdb:"):
+        tmdbid = int(mediaid.replace("tmdb:", ""))
+        if settings.RECOGNIZE_SOURCE == "douban":
+            doubaninfo = await media_chain.async_get_doubaninfo_by_tmdbid(
+                tmdbid=tmdbid, mtype=media_type
+            )
+            if not doubaninfo:
+                return None, "未识别到豆瓣媒体信息"
+            return call_search(doubanid=doubaninfo.get("id")), ""
+        return call_search(tmdbid=tmdbid), ""
+
+    if mediaid.startswith("douban:"):
+        doubanid = mediaid.replace("douban:", "")
+        if settings.RECOGNIZE_SOURCE == "themoviedb":
+            tmdbinfo = await media_chain.async_get_tmdbinfo_by_doubanid(
+                doubanid=doubanid, mtype=media_type
+            )
+            if not tmdbinfo:
+                return None, "未识别到TMDB媒体信息"
+            if tmdbinfo.get("season") and not media_season:
+                media_season = tmdbinfo.get("season")
+            return call_search(tmdbid=tmdbinfo.get("id")), ""
+        return call_search(doubanid=doubanid), ""
+
+    if mediaid.startswith("bangumi:"):
+        bangumiid = int(mediaid.replace("bangumi:", ""))
+        if settings.RECOGNIZE_SOURCE == "themoviedb":
+            tmdbinfo = await media_chain.async_get_tmdbinfo_by_bangumiid(
+                bangumiid=bangumiid
+            )
+            if not tmdbinfo:
+                return None, "未识别到TMDB媒体信息"
+            return call_search(tmdbid=tmdbinfo.get("id")), ""
+        doubaninfo = await media_chain.async_get_doubaninfo_by_bangumiid(
+            bangumiid=bangumiid
+        )
+        if not doubaninfo:
+            return None, "未识别到豆瓣媒体信息"
+        return call_search(doubanid=doubaninfo.get("id")), ""
+
+    event_data = MediaRecognizeConvertEventData(
+        mediaid=mediaid, convert_type=settings.RECOGNIZE_SOURCE
+    )
+    event = await eventmanager.async_send_event(
+        ChainEventType.MediaRecognizeConvert, event_data
+    )
+    if event and event.event_data and event.event_data.media_dict:
+        event_data = event.event_data
+        search_id = event_data.media_dict.get("id")
+        if event_data.convert_type == "themoviedb":
+            return call_search(tmdbid=search_id), ""
+        if event_data.convert_type == "douban":
+            return call_search(doubanid=search_id), ""
+
+    if not title:
+        return None, "未知的媒体ID"
+
+    meta = MetaInfo(title)
+    if year:
+        meta.year = year
+    if media_type:
+        meta.type = media_type
+    if media_season:
+        meta.type = MediaType.TV
+        meta.begin_season = media_season
+    mediainfo = await media_chain.async_recognize_by_meta(
+        meta,
+        obtain_images=False,
+    )
+    if not mediainfo:
+        return None, "未识别到媒体信息"
+    if settings.RECOGNIZE_SOURCE == "themoviedb":
+        return call_search(tmdbid=mediainfo.tmdb_id), ""
+    return call_search(doubanid=mediainfo.douban_id), ""
+
+
+@router.get("/subtitle/media/{mediaid}/stream", summary="渐进式精确搜索字幕")
+async def search_subtitle_by_id_stream(
+    request: Request,
+    mediaid: str,
+    mtype: Optional[str] = None,
+    title: Optional[str] = None,
+    year: Optional[str] = None,
+    season: Optional[str] = None,
+    episode: Optional[str] = None,
+    sites: Optional[str] = None,
+    _: schemas.TokenPayload = Depends(verify_resource_token),
+) -> Any:
+    """
+    根据TMDBID/豆瓣ID渐进式精确搜索站点字幕资源，返回格式为SSE。
+    """
+    subtitles, message = await _build_subtitle_search_source(
+        mediaid=mediaid,
+        mtype=mtype,
+        title=title,
+        year=year,
+        season=season,
+        episode=episode,
+        sites=sites,
+        stream=True,
+    )
+
+    async def event_source():
+        """
+        输出字幕精确搜索流事件。
+        """
+        if not subtitles:
+            yield {"type": "error", "success": False, "message": message or "未搜索到任何字幕"}
+            return
+        async for event in subtitles:
+            yield event
+
+    return StreamingResponse(
+        _stream_search_events(request, event_source()), media_type="text/event-stream"
+    )
+
+
+@router.get("/subtitle/media/{mediaid}", summary="精确搜索字幕", response_model=schemas.Response)
+async def search_subtitle_by_id(
+    mediaid: str,
+    mtype: Optional[str] = None,
+    title: Optional[str] = None,
+    year: Optional[str] = None,
+    season: Optional[str] = None,
+    episode: Optional[str] = None,
+    sites: Optional[str] = None,
+    _: schemas.TokenPayload = Depends(verify_token),
+) -> Any:
+    """
+    根据TMDBID/豆瓣ID精确搜索站点字幕资源。
+    """
+    subtitles, message = await _build_subtitle_search_source(
+        mediaid=mediaid,
+        mtype=mtype,
+        title=title,
+        year=year,
+        season=season,
+        episode=episode,
+        sites=sites,
+    )
+    if not subtitles:
+        return schemas.Response(success=False, message=message or "未搜索到任何字幕")
+
+    subtitles = await subtitles
+    if not subtitles:
+        return schemas.Response(success=False, message="未搜索到任何字幕")
+    return schemas.Response(
+        success=True, data=[subtitle.to_dict() for subtitle in subtitles]
     )
 
 

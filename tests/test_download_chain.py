@@ -4,9 +4,10 @@ from unittest.mock import MagicMock
 
 import app.chain.download as download_module
 from app.chain.download import DownloadChain
-from app.core.context import Context, MediaInfo, TorrentInfo
+from app.core.config import settings
+from app.core.context import Context, MediaInfo, SubtitleInfo, TorrentInfo
 from app.core.metainfo import MetaInfo
-from app.schemas import NotExistMediaInfo
+from app.schemas import FileItem, NotExistMediaInfo
 from app.schemas.types import MediaType
 
 
@@ -40,6 +41,64 @@ class _FakeThreadHelper:
 
     def submit(self, func, *args, **kwargs):
         self.submitted.append((func, args, kwargs))
+
+
+class _FakeSubtitleStorageChain:
+    """
+    模拟字幕 API 保存文件时使用的存储链。
+    """
+
+    def __init__(self):
+        """
+        初始化上传记录。
+        """
+        self.uploaded_files = []
+
+    def get_folder(self, storage, path):
+        """
+        模拟目标目录存在或已创建。
+        """
+        return FileItem(storage=storage, type="dir", path=path.as_posix(), name=path.name)
+
+    def get_file_item(self, _storage, _path):
+        """
+        模拟目标字幕文件不存在。
+        """
+        return None
+
+    def upload_file(self, fileitem, path):
+        """
+        记录上传的临时字幕文件。
+        """
+        self.uploaded_files.append(path)
+        return FileItem(
+            storage=fileitem.storage,
+            type="file",
+            path=(Path(fileitem.path) / path.name).as_posix(),
+            name=path.name,
+        )
+
+
+class _FakeSubtitleResponse:
+    """
+    模拟字幕 API 下载响应。
+    """
+
+    content = b"subtitle-content"
+    headers = {}
+
+
+class _FakeSubtitleResponseWithHeader:
+    """
+    模拟带下载文件名响应头的字幕 API 响应。
+    """
+
+    content = b"archive-content"
+    headers = {
+        "content-disposition": (
+            'attachment; filename="Hypnosis_AKA_Saimin_(1999)_480i_JAPANESE_NTSC_DVD_REMUX_MPEG-2_DD_2.0-MeeSta.rar"'
+        )
+    }
 
 
 def test_download_single_submits_download_added_to_background(monkeypatch):
@@ -97,6 +156,111 @@ def test_download_single_submits_download_added_to_background(monkeypatch):
         download_dir=Path("/downloads"),
         torrent_content=b"torrent-content",
     )
+
+
+def test_save_subtitle_response_creates_missing_temp_directory(monkeypatch, tmp_path):
+    """
+    下载字幕 API 保存响应前应自动创建缺失的临时目录。
+    """
+    storage_chain = _FakeSubtitleStorageChain()
+    temp_path = tmp_path / "missing-temp"
+    assert not temp_path.exists()
+
+    monkeypatch.setattr(
+        download_module,
+        "settings",
+        SimpleNamespace(TEMP_PATH=temp_path, RMT_SUBEXT=settings.RMT_SUBEXT),
+    )
+    monkeypatch.setattr(download_module, "StorageChain", lambda: storage_chain)
+    chain = DownloadChain.__new__(DownloadChain)
+    subtitle = SubtitleInfo(
+        title="Demo Movie",
+        enclosure="https://example.test/subtitle.srt",
+        file_name="Demo.Movie.zh-cn.srt",
+    )
+
+    saved_files = chain._save_subtitle_response(
+        subtitle=subtitle,
+        response=_FakeSubtitleResponse(),
+        target_dir=Path("/downloads"),
+    )
+
+    assert temp_path.exists()
+    assert saved_files == ["/downloads/Demo.Movie.zh-cn.srt"]
+    assert storage_chain.uploaded_files
+
+
+def test_save_subtitle_response_accepts_rar_filename_from_header(monkeypatch, tmp_path):
+    """
+    PHP 下载链接应按响应头文件名识别 RAR 字幕压缩包，而不是按 URL 后缀误拒绝。
+    """
+    storage_chain = _FakeSubtitleStorageChain()
+    temp_path = tmp_path / "temp"
+    extracted_dir = temp_path / "Hypnosis_AKA_Saimin_(1999)_480i_JAPANESE_NTSC_DVD_REMUX_MPEG-2_DD_2.0-MeeSta"
+    extracted_subtitle = extracted_dir / "Hypnosis_AKA_Saimin_(1999).srt"
+
+    def fake_unpack_archive(archive_file, extract_dir, archive_format=None):
+        assert archive_format == "rar"
+        assert archive_file.suffix == ".rar"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        extracted_subtitle.write_text("subtitle", encoding="utf-8")
+
+    monkeypatch.setattr(
+        download_module,
+        "settings",
+        SimpleNamespace(TEMP_PATH=temp_path, RMT_SUBEXT=settings.RMT_SUBEXT),
+    )
+    monkeypatch.setattr(download_module, "StorageChain", lambda: storage_chain)
+    monkeypatch.setattr(download_module.SystemUtils, "unpack_archive", fake_unpack_archive)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    subtitle = SubtitleInfo(
+        title="Hypnosis",
+        enclosure="https://audiences.me/downloadsubs.php?torrentid=666519&subid=2195",
+    )
+
+    saved_files = chain._save_subtitle_response(
+        subtitle=subtitle,
+        response=_FakeSubtitleResponseWithHeader(),
+        target_dir=Path("/downloads"),
+    )
+
+    assert saved_files == ["/downloads/Hypnosis_AKA_Saimin_(1999).srt"]
+    assert storage_chain.uploaded_files == [extracted_subtitle]
+
+
+def test_save_subtitle_response_rejects_unsupported_filename_from_header(monkeypatch, tmp_path):
+    """
+    响应头文件名不是字幕或支持的压缩包时，应继续拒绝保存。
+    """
+    storage_chain = _FakeSubtitleStorageChain()
+    temp_path = tmp_path / "temp"
+    response = SimpleNamespace(
+        content=b"<html>error</html>",
+        headers={"content-disposition": 'attachment; filename="error.html"'},
+    )
+
+    monkeypatch.setattr(
+        download_module,
+        "settings",
+        SimpleNamespace(TEMP_PATH=temp_path, RMT_SUBEXT=settings.RMT_SUBEXT),
+    )
+    monkeypatch.setattr(download_module, "StorageChain", lambda: storage_chain)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    subtitle = SubtitleInfo(
+        title="Hypnosis",
+        enclosure="https://audiences.me/downloadsubs.php?torrentid=666519&subid=2195",
+    )
+
+    saved_files = chain._save_subtitle_response(
+        subtitle=subtitle,
+        response=response,
+        target_dir=Path("/downloads"),
+    )
+
+    assert saved_files == []
+    assert storage_chain.uploaded_files == []
 
 
 class _FakeBatchTorrentHelper:

@@ -43,7 +43,8 @@ class SiteSpider:
                  mtype: MediaType = None,
                  cat: Optional[str] = None,
                  page: Optional[int] = 0,
-                 referer: Optional[str] = None):
+                 referer: Optional[str] = None,
+                 search_type: Optional[str] = "torrents"):
         """
         设置查询参数
         :param indexer: 索引器
@@ -58,20 +59,32 @@ class SiteSpider:
         self.keyword = keyword
         self.cat = cat
         self.mtype = mtype
+        self.search_type = search_type or "torrents"
         self.indexerid = indexer.get('id')
         self.indexername = indexer.get('name')
-        self.search = indexer.get('search')
-        self.batch = indexer.get('batch')
-        self.browse = indexer.get('browse')
-        self.category = indexer.get('category')
-        self.list = indexer.get('torrents').get('list', {})
-        self.fields = indexer.get('torrents').get('fields')
-        if not keyword and self.browse:
-            self.list = self.browse.get('list') or self.list
-            self.fields = self.browse.get('fields') or self.fields
+        if self.search_type == "subtitles":
+            subtitle_conf = indexer.get('subtitles') or {}
+            self.search = subtitle_conf.get('search')
+            self.batch = subtitle_conf.get('batch')
+            self.browse = subtitle_conf.get('browse')
+            self.category = subtitle_conf.get('category')
+            self.list = subtitle_conf.get('list') or {}
+            self.fields = subtitle_conf.get('fields') or {}
+            result_num = subtitle_conf.get('result_num') or indexer.get('result_num')
+        else:
+            self.search = indexer.get('search')
+            self.batch = indexer.get('batch')
+            self.browse = indexer.get('browse')
+            self.category = indexer.get('category')
+            self.list = (indexer.get('torrents') or {}).get('list', {})
+            self.fields = (indexer.get('torrents') or {}).get('fields') or {}
+            if not keyword and self.browse:
+                self.list = self.browse.get('list') or self.list
+                self.fields = self.browse.get('fields') or self.fields
+            result_num = indexer.get('result_num')
         self._field_templates = self.__build_field_templates()
         self.domain = indexer.get('domain')
-        self.result_num = int(indexer.get('result_num') or self.default_result_num())
+        self.result_num = int(result_num or self.default_result_num())
         self._timeout = int(indexer.get('timeout') or 15)
         self.page = page
         if self.domain and not str(self.domain).endswith("/"):
@@ -399,6 +412,30 @@ class SiteSpider:
             else:
                 self.torrents_info['enclosure'] = download_link
 
+    def __get_report_url(self, torrent: Any):
+        """
+        获取字幕举报页面链接。
+        """
+        if 'report' not in self.fields:
+            return
+        selector = self.fields.get('report', {})
+        item = self._safe_query(torrent, selector)
+        report_link = self.__filter_text(item, selector.get('filters'))
+        if report_link:
+            self.torrents_info['report_url'] = self.__normalize_link(report_link)
+
+    def __get_language_icon(self, torrent: Any):
+        """
+        获取字幕语言图标链接。
+        """
+        if 'language_icon' not in self.fields:
+            return
+        selector = self.fields.get('language_icon', {})
+        item = self._safe_query(torrent, selector)
+        icon_link = self.__filter_text(item, selector.get('filters'))
+        if icon_link:
+            self.torrents_info['language_icon'] = self.__normalize_link(icon_link)
+
     def __get_imdbid(self, torrent: Any):
         # imdbid
         if "imdbid" not in self.fields:
@@ -413,7 +450,7 @@ class SiteSpider:
             return
         selector = self.fields.get('size', {})
         item = self._safe_query(torrent, selector)
-        if item:
+        if item is not None and item != "":
             size_val = item.replace("\n", "").strip()
             size_val = self.__filter_text(size_val,
                                           selector.get('filters'))
@@ -455,7 +492,7 @@ class SiteSpider:
             return
         selector = self.fields.get('grabs', {})
         item = self._safe_query(torrent, selector)
-        if item:
+        if item is not None and item != "":
             grabs_val = item.split("/")[0]
             grabs_val = grabs_val.replace(",", "")
             grabs_val = self.__filter_text(grabs_val, selector.get('filters'))
@@ -600,6 +637,52 @@ class SiteSpider:
         else:
             self.torrents_info['category'] = MediaType.UNKNOWN.value
 
+    def __get_subtitle_field(self, torrent: Any, field_name: str):
+        """
+        按配置读取字幕字段。
+        """
+        selector = self.fields.get(field_name, {})
+        if not selector:
+            return
+        item = self._safe_query(torrent, selector)
+        value = self.__filter_text(item, selector.get('filters'))
+        if value is not None:
+            self.torrents_info[field_name] = value
+
+    def __fill_subtitle_ids(self):
+        """
+        从字幕下载链接中补充站点种子ID和字幕ID。
+        """
+        enclosure = self.torrents_info.get("enclosure")
+        if not enclosure:
+            return
+        query_params = parse_qs(urlparse(enclosure).query)
+        if not self.torrents_info.get("torrent_id"):
+            torrent_id = query_params.get("torrentid") or query_params.get("torrent_id")
+            if torrent_id:
+                self.torrents_info["torrent_id"] = torrent_id[0]
+        if not self.torrents_info.get("subtitle_id"):
+            subtitle_id = query_params.get("subid") or query_params.get("subtitle")
+            if subtitle_id:
+                self.torrents_info["subtitle_id"] = subtitle_id[0]
+
+    def __normalize_link(self, link: Optional[str]) -> Optional[str]:
+        """
+        将站点相对链接转换为绝对链接。
+        """
+        if not link:
+            return None
+        parsed_link = urlparse(link)
+        if parsed_link.scheme:
+            return link
+        if not link.startswith("http"):
+            if link.startswith("//"):
+                return self.domain.split(":")[0] + ":" + link
+            if link.startswith("/"):
+                return self.domain + link[1:]
+            return self.domain + link
+        return link
+
     def _safe_query(self, torrent: Any, selector_config: Optional[dict]) -> Optional[str]:
         """
         安全地执行PyQuery查询并自动清理资源
@@ -672,6 +755,36 @@ class SiteSpider:
         finally:
             self.torrents_info.clear()
 
+    def get_subtitle_info(self, subtitle: Any) -> dict:
+        """
+        解析单条字幕数据。
+        """
+        self.torrents_info = {}
+        try:
+            self.__get_title(subtitle)
+            self.__get_description(subtitle)
+            self.__get_detail(subtitle)
+            self.__get_download(subtitle)
+            self.__get_size(subtitle)
+            self.__get_pubdate(subtitle)
+            self.__get_date_elapsed(subtitle)
+            self.__get_grabs(subtitle)
+            self.__get_language_icon(subtitle)
+            self.__get_report_url(subtitle)
+            for field_name in (
+                    "language", "uploader", "torrent_id", "subtitle_id", "file_name"
+            ):
+                self.__get_subtitle_field(subtitle, field_name)
+            self.__fill_subtitle_ids()
+            if not self.torrents_info.get("title") or not self.torrents_info.get("enclosure"):
+                return {}
+            return self.torrents_info.copy() if self.torrents_info else {}
+        except Exception as err:
+            logger.error("%s 字幕搜索出现错误：%s" % (self.indexername, str(err)))
+            return {}
+        finally:
+            self.torrents_info.clear()
+
     @staticmethod
     def __filter_text(text: Optional[str], filters: Optional[List[dict]]) -> str:
         """
@@ -723,6 +836,9 @@ class SiteSpider:
 
     @staticmethod
     def __attribute_or_text(item: Any, selector: Optional[dict]) -> list:
+        """
+        获取查询结果的属性或文本列表。
+        """
         if not selector:
             return item
         if not item:
@@ -735,6 +851,9 @@ class SiteSpider:
 
     @staticmethod
     def __index(items: Optional[list], selector: Optional[dict]) -> Optional[str]:
+        """
+        按配置下标读取查询结果。
+        """
         if not items:
             return None
         if selector:
@@ -750,6 +869,25 @@ class SiteSpider:
             item = items[0]
         return item
 
+    @staticmethod
+    def __is_login_or_permission_page(html_doc: Any) -> bool:
+        """
+        判断返回内容是否是登录或权限提示页。
+        """
+        title = (html_doc("title").text() or "").strip()
+        page_text = " ".join((html_doc.text() or "").split())[:1000]
+        if title == "登录" or ":: 登录" in title:
+            return True
+        return any(
+            marker in page_text
+            for marker in (
+                "未登录",
+                "登录 / 注册",
+                "必须在登录后才能访问",
+                "你需要启用cookies才能登录",
+            )
+        )
+
     def parse(self, html_text: str) -> List[dict]:
         """
         解析整个页面
@@ -758,16 +896,42 @@ class SiteSpider:
             self.is_error = True
             return []
 
-        rust_torrents = rust_accel.parse_indexer_torrents(
-            html_text=html_text,
-            domain=self.domain,
-            list_config=self.list,
-            fields=self.fields,
-            category=self.category,
-            result_num=self.result_num
-        )
-        if rust_torrents is not None:
-            return rust_torrents
+        try:
+            status_doc = PyQuery(html_text)
+            if self.__is_login_or_permission_page(status_doc):
+                self.is_error = True
+                logger.warn(f"错误：{self.indexername} 返回登录或权限提示页")
+                return []
+        except Exception as err:
+            self.is_error = True
+            logger.warn(f"错误：{self.indexername} {str(err)}")
+            return []
+        finally:
+            if 'status_doc' in locals():
+                status_doc.clear()  # noqa
+                del status_doc
+
+        if self.search_type == "subtitles":
+            rust_subtitles = rust_accel.parse_indexer_subtitles(
+                html_text=html_text,
+                domain=self.domain,
+                list_config=self.list,
+                fields=self.fields,
+                result_num=self.result_num
+            )
+            if rust_subtitles is not None:
+                return rust_subtitles
+        else:
+            rust_torrents = rust_accel.parse_indexer_torrents(
+                html_text=html_text,
+                domain=self.domain,
+                list_config=self.list,
+                fields=self.fields,
+                category=self.category,
+                result_num=self.result_num
+            )
+            if rust_torrents is not None:
+                return rust_torrents
 
         # 清空旧结果
         self.torrents_info_array = []
@@ -777,15 +941,19 @@ class SiteSpider:
             html_doc = PyQuery(html_text)
             # 种子筛选器
             torrents_selector = self.list.get('selector', '')
+            rows = html_doc(torrents_selector)
             # 遍历种子html列表
-            for i, torn in enumerate(html_doc(torrents_selector)):
+            for i, torn in enumerate(rows):
                 if i >= int(self.result_num):
                     break
                 # 创建临时PyQuery对象进行解析
                 torrent_query = PyQuery(torn)
                 try:
                     # 直接获取种子信息，避免深拷贝
-                    torrent_info = self.get_info(torrent_query)
+                    if self.search_type == "subtitles":
+                        torrent_info = self.get_subtitle_info(torrent_query)
+                    else:
+                        torrent_info = self.get_info(torrent_query)
                     if torrent_info:
                         # 浅拷贝即可，减少内存使用
                         self.torrents_info_array.append(torrent_info)
