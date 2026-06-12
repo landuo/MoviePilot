@@ -159,7 +159,8 @@ RUN mkdir -p /app/bin \
 # final 阶段: 安装运行时依赖和配置最终镜像
 FROM prepare_package AS final
 
-ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so"
+ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so" \
+    MOVIEPILOT_DOCKER_KEEPALIVE_ON_FAILURE="true"
 
 # 引入支持 amr 编码的静态 ffmpeg
 COPY --from=mwader/static-ffmpeg:8.1.1 /ffmpeg /usr/local/bin/
@@ -190,7 +191,8 @@ RUN cp -f /app/docker/nginx.common.conf /etc/nginx/common.conf \
     && cp -f /app/docker/update.sh /usr/local/bin/mp_update.sh \
     && cp -f /app/docker/entrypoint.sh /entrypoint.sh \
     && cp -f /app/docker/docker_http_proxy.conf /etc/nginx/docker_http_proxy.conf \
-    && chmod +x /entrypoint.sh /usr/local/bin/mp_update.sh \
+    && printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'cd /app' 'exec "${VENV_PATH:-/opt/venv}/bin/python3" -m app.cli "$@"' > /usr/local/bin/moviepilot \
+    && chmod +x /entrypoint.sh /usr/local/bin/mp_update.sh /usr/local/bin/moviepilot \
     && mkdir -p ${HOME} \
     && groupadd -r moviepilot -g 918 \
     && useradd -r moviepilot -g moviepilot -d ${HOME} -s /bin/bash -u 918 \
@@ -203,4 +205,5 @@ RUN cp -f /app/docker/nginx.common.conf /etc/nginx/common.conf \
 
 EXPOSE 3000
 VOLUME [ "${CONFIG_DIR}" ]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD curl -fsS "http://127.0.0.1:${PORT:-3001}/api/v1/system/global?token=moviepilot" >/dev/null || exit 1
 ENTRYPOINT [ "/usr/bin/tini", "-g", "--", "/entrypoint.sh" ]

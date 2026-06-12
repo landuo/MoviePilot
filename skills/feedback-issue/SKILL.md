@@ -69,8 +69,9 @@ Only enter this skill when both conditions are true:
   bug, or the user explicitly asks to escalate after troubleshooting.
 
 For ordinary symptoms, first use normal Agent diagnostic tools such as
-subscription, download, site, plugin, scheduler, and log queries. If the
-cause is local configuration or environment, do not file an issue.
+`query_doctor_report`, subscription, download, site, plugin, scheduler,
+and log queries. If the cause is local configuration or environment, do
+not file an issue.
 
 ### 2. Collect Diagnostics
 
@@ -93,6 +94,10 @@ The script outputs JSON. Keep `diagnostics_file` and `runtime_dir`.
 The raw logs are written into `diagnostics_file`, already redacted and
 capped; do not paste the full file back into the model context unless
 you need to show the preview generated in the next step.
+The collect script also runs `moviepilot doctor --json` or falls back to
+`python -m app.cli doctor --json`, stores the structured doctor report
+inside `diagnostics_file`, and later preview/submit steps include a
+short doctor summary automatically.
 
 If `success=false` with `no_explicit_feedback_intent`, stop this skill
 and return to local diagnosis.
