@@ -423,6 +423,50 @@ def test_sync_subtitle_search_reports_spider_error(monkeypatch):
     assert captured["error_flag"] is True
 
 
+def test_worker_subtitle_search_reports_parse_error(monkeypatch):
+    """
+    Worker 预取 HTML 后也应在解析完成后上报爬虫错误状态。
+    """
+    captured = {}
+
+    def fake_check(_site, _search_word=None):
+        """跳过站点流控检查。"""
+        return True
+
+    def fake_parse(self, _html):
+        """模拟 Worker HTML 解析后设置错误状态。"""
+        self.is_error = True
+        return []
+
+    def fake_statistic(site, error_flag=False, seconds=0):
+        """捕获 Worker 搜索传给统计的错误状态。"""
+        captured["site"] = site
+        captured["error_flag"] = error_flag
+        captured["seconds"] = seconds
+
+    spider_search = IndexerModule._IndexerModule__spider_search
+    runtime_indexer_module = spider_search.__globals__["IndexerModule"]
+    runtime_site_spider = spider_search.__globals__["SiteSpider"]
+
+    monkeypatch.setattr(IndexerModule, "_IndexerModule__search_check", staticmethod(fake_check))
+    monkeypatch.setattr(
+        runtime_indexer_module,
+        "_IndexerModule__try_worker_fetch",
+        staticmethod(lambda _spider: "<html></html>"),
+    )
+    monkeypatch.setattr(runtime_site_spider, "parse", fake_parse)
+    monkeypatch.setattr(IndexerModule, "_IndexerModule__indexer_statistic", staticmethod(fake_statistic))
+
+    site = _audiences_indexer()
+    site["subtitles"]["search"] = {"paths": [{"path": "subtitles.php?search={keyword}"}]}
+
+    result = IndexerModule().search_subtitles(site=site, keyword="The.Capture")
+
+    assert result == []
+    assert captured["site"] == site
+    assert captured["error_flag"] is True
+
+
 def test_subtitle_site_spider_keeps_parseable_nested_nexus_rows(monkeypatch):
     """
     Python 字幕解析应保留可解析的 NexusPHP 嵌套行结果。

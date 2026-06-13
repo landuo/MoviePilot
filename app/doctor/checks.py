@@ -16,6 +16,7 @@ import psutil
 
 from app.core.config import settings
 from app.doctor.models import DoctorFinding, DoctorFindingStatus, DoctorReport, DoctorSeverity
+from app.utils.http import RequestUtils
 from app.utils.system import SystemUtils
 
 
@@ -33,6 +34,9 @@ CORE_DEPENDENCIES = (
     "uvicorn",
 )
 LOCAL_HOSTS = {"", "0.0.0.0", "::", "::1", "localhost"}
+BACKEND_HEALTH_PATH = "/api/v1/system/global"
+BACKEND_HEALTH_TOKEN = "moviepilot"
+BACKEND_HEALTH_TIMEOUT = 0.5
 LOG_ERROR_PATTERNS = (
     re.compile(r"\btraceback\b", re.IGNORECASE),
     re.compile(r"\b(error|critical|exception)\b", re.IGNORECASE),
@@ -218,6 +222,41 @@ def _can_connect(host: str, port: int, timeout: float = 1.0) -> tuple[bool, str]
             return True, ""
     except OSError as err:
         return False, str(err)
+
+
+def _is_moviepilot_backend_payload(payload: Any) -> bool:
+    """
+    判断本地健康接口响应是否来自 MoviePilot 后端。
+    """
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        return False
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return False
+    return bool(data.get("BACKEND_VERSION"))
+
+
+def _backend_health_payload(port: int, timeout: float = BACKEND_HEALTH_TIMEOUT) -> Optional[dict[str, Any]]:
+    """
+    读取本机后端健康接口响应，用于识别非 CLI 管理的 MoviePilot 进程。
+    """
+    url = f"http://{_client_host(settings.HOST)}:{port}{BACKEND_HEALTH_PATH}"
+    response = RequestUtils(
+        headers={"Accept": "application/json"},
+        timeout=timeout,
+    ).get_res(
+        url=url,
+        params={"token": BACKEND_HEALTH_TOKEN},
+    )
+    if response is None or response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return None
+    finally:
+        response.close()
+    return payload if _is_moviepilot_backend_payload(payload) else None
 
 
 def _tail_lines(path: Path, max_lines: int = 120, max_bytes: int = 256 * 1024) -> list[str]:
@@ -424,6 +463,24 @@ def _check_port(
             context={"port": port, "pids": [process.pid for process in expected_processes]},
         )
         return
+
+    if name == "backend":
+        health_payload = _backend_health_payload(port)
+        if health_payload:
+            runner.add(
+                finding_id=f"port.{name}_listening_unmanaged",
+                severity=DoctorSeverity.Info,
+                status=DoctorFindingStatus.Ok,
+                title=f"{name} 端口由 MoviePilot 后端监听",
+                detail=f"端口 {port} 健康接口响应正常；监听进程：{'; '.join(descriptions)}",
+                recommendation="Docker 或非 CLI 管理启动方式下，后端端口被当前服务监听属于正常状态。",
+                context={
+                    "port": port,
+                    "pids": [process.pid for process in occupants],
+                    "backend_version": health_payload.get("data", {}).get("BACKEND_VERSION"),
+                },
+            )
+            return
 
     runner.add(
         finding_id=f"port.{name}_occupied",

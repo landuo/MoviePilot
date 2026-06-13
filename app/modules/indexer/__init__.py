@@ -865,9 +865,11 @@ class IndexerModule(_ModuleBase):
             # 尝试通过 mp-indexer worker 加速 HTTP 请求
             html = IndexerModule.__try_worker_fetch(_spider)
             if html is not None:
-                return _spider.is_error, _spider.parse(html)
-            # Fallback：走原有 Python HTTP 请求
-            return _spider.is_error, _spider.get_torrents()
+                result = _spider.parse(html)
+            else:
+                # Fallback：走原有 Python HTTP 请求
+                result = _spider.get_torrents()
+            return _spider.is_error, result
         finally:
             del _spider
 
@@ -899,9 +901,10 @@ class IndexerModule(_ModuleBase):
             # 尝试通过 mp-indexer worker 加速 HTTP 请求
             html = IndexerModule.__try_worker_fetch(_spider)
             if html is not None:
-                return _spider.is_error, _spider.parse(html)
-            # Fallback：走原有 Python 异步 HTTP 请求
-            result = await _spider.async_get_torrents()
+                result = _spider.parse(html)
+            else:
+                # Fallback：走原有 Python 异步 HTTP 请求
+                result = await _spider.async_get_torrents()
             return _spider.is_error, result
         finally:
             del _spider

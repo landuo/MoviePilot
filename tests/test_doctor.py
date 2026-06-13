@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from app.core.config import settings
-from app.doctor import run_doctor
+from app.doctor import checks, run_doctor
 from app.doctor.formatters import format_json_report, format_text_report
 from app.doctor.models import DoctorFinding, DoctorFindingStatus, DoctorSeverity
+from app.doctor.runner import DoctorRunner
 
 
 def test_doctor_report_has_stable_json_shape(tmp_path, monkeypatch):
@@ -60,3 +64,54 @@ def test_doctor_fix_removes_stale_runtime(tmp_path, monkeypatch):
     finding = report.find("runtime.backend_stale")
     assert finding is not None
     assert finding.fixed
+
+
+def test_doctor_accepts_healthy_unmanaged_backend_port(monkeypatch):
+    """doctor 在容器中应把健康的非 CLI 管理后端端口识别为正常。"""
+    occupant = SimpleNamespace(pid=12345)
+    monkeypatch.setattr(checks, "_port_occupants", lambda port: [occupant])
+    monkeypatch.setattr(checks, "_process_description", lambda process: f"PID {process.pid} (python)")
+    monkeypatch.setattr(checks, "_is_expected_port_process", lambda name, process: False)
+    monkeypatch.setattr(
+        checks,
+        "_backend_health_payload",
+        lambda port: {"success": True, "data": {"BACKEND_VERSION": "v2-test"}},
+    )
+
+    runner = DoctorRunner()
+    checks._check_port(runner, name="backend", port=3001, managed_process=None)
+
+    finding = runner.report.find("port.backend_listening_unmanaged")
+    assert finding is not None
+    assert finding.status == DoctorFindingStatus.Ok
+    assert finding.severity == DoctorSeverity.Info
+    assert finding.context["backend_version"] == "v2-test"
+    assert runner.report.find("port.backend_occupied") is None
+
+
+def test_backend_health_payload_uses_request_utils(monkeypatch):
+    """doctor 后端健康探测应通过统一请求工具访问本地接口。"""
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "success": True,
+        "data": {"BACKEND_VERSION": "v2-test"},
+    }
+    request_utils = MagicMock()
+    request_utils.get_res.return_value = response
+    request_utils_class = MagicMock(return_value=request_utils)
+    monkeypatch.setattr(checks, "RequestUtils", request_utils_class)
+    monkeypatch.setattr(settings, "HOST", "0.0.0.0")
+
+    payload = checks._backend_health_payload(port=3001, timeout=0.25)
+
+    assert payload == response.json.return_value
+    request_utils_class.assert_called_once_with(
+        headers={"Accept": "application/json"},
+        timeout=0.25,
+    )
+    request_utils.get_res.assert_called_once_with(
+        url="http://127.0.0.1:3001/api/v1/system/global",
+        params={"token": "moviepilot"},
+    )
+    response.close.assert_called_once_with()

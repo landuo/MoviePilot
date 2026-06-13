@@ -88,7 +88,7 @@ class SystemChain(ChainBase):
                     if target_path.exists():
                         continue
                     shutil.copytree(item, target_path)
-                    logger.info(f"已备份插件目录: {item.name}")
+                    logger.debug(f"已备份插件目录: {item.name}")
                 # 如果是文件
                 elif item.is_file():
                     if target_path.exists():
@@ -135,12 +135,12 @@ class SystemChain(ChainBase):
                         if target_path.exists():
                             shutil.rmtree(target_path)
                         shutil.copytree(item, target_path)
-                        logger.info(f"已恢复插件目录: {item.name}")
+                        logger.debug(f"已恢复插件目录: {item.name}")
                         restored_count += 1
                     # 如果是文件
                     elif item.is_file():
                         shutil.copy2(item, target_path)
-                        logger.info(f"已恢复插件文件: {item.name}")
+                        logger.debug(f"已恢复插件文件: {item.name}")
                         restored_count += 1
                 except Exception as e:
                     logger.error(f"恢复插件 {item.name} 时发生错误: {str(e)}")
