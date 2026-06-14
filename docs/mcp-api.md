@@ -108,12 +108,15 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 | GET | `/api/v1/download/paths` | 查询可用于下载接口 `save_path` 参数的下载路径 |
 | DELETE | `/api/v1/download/{hashString}` | 删除下载任务，参数：`name` |
 
+MCP 工具 `query_download_tasks` 支持 `status=all|downloading|completed|paused`；其中 `completed` 表示下载器任务既不是下载中，也不是暂停状态。默认仅查询带 MoviePilot 内置标签的任务；如需诊断下载器中未打内置标签的任务，可传 `include_all_tags=true`。
+
 #### 系统
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/system/ping` | 登录用户服务存活检测，用于前端重启后轮询恢复状态 |
 | GET | `/api/v1/system/setting/public/{key}` | 登录用户读取白名单内非敏感系统设置，仅支持目录、存储、站点范围、默认订阅规则、Follow 订阅者和插件市场地址等前端必需配置 |
+| POST | `/api/v1/system/setting/PLUGIN_MARKET/sync-wiki` | 管理员从 MoviePilot Wiki 的插件文档同步公开插件仓库清单，和本地 `PLUGIN_MARKET` 合并去重后写入配置 |
 
 ### 插件补充接口
 
@@ -220,6 +223,20 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 ```
 
 `browse_webpage` 使用持久浏览器会话，默认以当前 Agent 会话作为 `session_key`。`goto`、`snapshot`、`click`、`click_ref`、`fill`、`fill_ref`、`select`、`select_ref`、`wait` 等动作会返回页面快照，快照中的 `interactive_elements[].ref` 可用于后续 `*_ref` 操作。支持 `list_tabs`、`open_tab`、`focus_tab`、`close_tab` 管理标签页，支持 `close_session` 释放会话。出于安全考虑，默认拒绝访问 localhost、环回地址、私网地址和链路本地地址；确需访问可信内网或本机页面时，可显式传入 `allow_private_network: true`。
+
+**`recognize_captcha` 图形验证码识别示例**:
+```json
+{
+  "tool_name": "recognize_captcha",
+  "arguments": {
+    "image_url": "https://example.com/captcha.png",
+    "cookie": "sid=...",
+    "user_agent": "Mozilla/5.0 ..."
+  }
+}
+```
+
+`recognize_captcha` 用于浏览器自动化登录时识别普通图形验证码。智能体可先通过 `browse_webpage` 的 `evaluate` 动作从页面元素中提取 `img.src`，再把图片地址传给该工具；支持 `http/https` 图片地址和 `data:image/...;base64,...`。当验证码图片依赖当前浏览器会话时，可传入 Cookie 与 User-Agent。出于安全考虑，默认拒绝访问 localhost、环回地址、私网地址和链路本地地址；确需访问可信内网或本机验证码图片时，可显式传入 `allow_private_network: true`。
 
 ### 3. 获取工具详情
 
