@@ -108,8 +108,6 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 | GET | `/api/v1/download/paths` | 查询可用于下载接口 `save_path` 参数的下载路径 |
 | DELETE | `/api/v1/download/{hashString}` | 删除下载任务，参数：`name` |
 
-MCP 工具 `query_download_tasks` 支持 `status=all|downloading|completed|paused`；其中 `completed` 表示下载器任务既不是下载中，也不是暂停状态。默认仅查询带 MoviePilot 内置标签的任务；如需诊断下载器中未打内置标签的任务，可传 `include_all_tags=true`。
-
 #### 系统
 
 | 方法 | 路径 | 说明 |
@@ -237,6 +235,13 @@ MCP 工具 `query_download_tasks` 支持 `status=all|downloading|completed|pause
 ```
 
 `recognize_captcha` 用于浏览器自动化登录时识别普通图形验证码。智能体可先通过 `browse_webpage` 的 `evaluate` 动作从页面元素中提取 `img.src`，再把图片地址传给该工具；支持 `http/https` 图片地址和 `data:image/...;base64,...`。当验证码图片依赖当前浏览器会话时，可传入 Cookie 与 User-Agent。出于安全考虑，默认拒绝访问 localhost、环回地址、私网地址和链路本地地址；确需访问可信内网或本机验证码图片时，可显式传入 `allow_private_network: true`。
+
+**下载任务工具说明**：
+
+- `add_download_tasks` 用于添加下载任务，支持 `get_search_results` 返回的 `hash:id` 引用和磁力链接，可指定下载器、保存目录和标签。
+- `query_download_tasks` 用于查询下载任务，支持按下载器、状态、Hash、标题、标签过滤；返回保存目录、内容路径、上传/下载速度、上传/下载限速、分类、分享率、做种时间等下载器可提供的字段。按 `hash` 查询或传入 `include_trackers=true` 时，会尽量返回 Tracker URL 列表。
+- `update_download_tasks` 用于修改下载任务，统一支持 `start`/`stop`、标签、上传/下载限速、Tracker、保存目录、分类、分享率、做种时间等字段；具体字段是否成功取决于下载器能力，返回结果会按操作项逐条标记成功或失败。
+- `delete_download_tasks` 用于删除下载任务，按任务 Hash 操作，可指定下载器，并可选择是否同时删除已下载文件。
 
 ### 3. 获取工具详情
 
