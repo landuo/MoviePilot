@@ -454,7 +454,7 @@ class TestAgentToolStreaming(unittest.TestCase):
                     return_value=Path("/tmp/reply.opus"),
                 ) as synthesize_speech,
                 patch(
-                    "app.agent.tools.impl.send_voice_message.ToolChain.async_post_message",
+                    "app.agent.tools.base.ToolChain.async_post_message",
                     new_callable=AsyncMock,
                 ) as async_post_message,
             ):
@@ -496,7 +496,7 @@ class TestAgentToolStreaming(unittest.TestCase):
                     "app.agent.tools.impl.send_voice_message.AgentCapabilityManager.synthesize_speech"
                 ) as synthesize_speech,
                 patch(
-                    "app.agent.tools.impl.send_voice_message.ToolChain.async_post_message",
+                    "app.agent.tools.base.ToolChain.async_post_message",
                     new_callable=AsyncMock,
                 ) as async_post_message,
             ):
