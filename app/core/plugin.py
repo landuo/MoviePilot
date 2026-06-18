@@ -466,7 +466,8 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
                     pid=plugin_dir_name,
                     package_version=package_version,
                     repo_path=local_repo_path,
-                    strict_compat=False
+                    strict_compat=False,
+                    strict_system_version=not settings.DEV
                 )
                 if candidate:
                     return candidate
@@ -487,6 +488,9 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
 
         candidate = candidate or PluginHelper().get_local_plugin_candidate(pid)
         if not candidate:
+            return False
+        if candidate.get("compatible") is False:
+            logger.info(f"本地插件 {pid} 不满足同步条件，跳过自动同步：{candidate.get('skip_reason')}")
             return False
 
         source_dir = Path(candidate.get("path"))
@@ -1305,6 +1309,20 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
         plugins.sort(key=lambda x: x.plugin_order if hasattr(x, "plugin_order") else 0)
         return plugins
 
+    def get_local_plugin_version(self, pid: str) -> Optional[str]:
+        """
+        获取指定已安装插件的本地版本，不触发全部插件的状态、页面和权限计算。
+
+        插件类由运行期动态加载，旧插件可能未声明版本属性，因此缺失时返回 None。
+        """
+        installed_apps = SystemConfigOper().get(SystemConfigKey.UserInstalledPlugins) or []
+        if pid not in installed_apps:
+            return None
+        plugin_class = self._plugins.get(pid)
+        if not plugin_class:
+            return None
+        return getattr(plugin_class, "plugin_version", None)
+
     def get_local_repo_plugins(self) -> List[schemas.Plugin]:
         """
         获取本地插件仓库目录中的插件信息
@@ -1542,6 +1560,8 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
         # 更新历史
         if plugin_info.get("history"):
             plugin.history = plugin_info.get("history")
+        # Release 能力位来自插件市场索引，用于前端展示和后端安装入口双重校验。
+        plugin.release = bool(plugin_info.get("release"))
         # 仓库链接
         plugin.repo_url = market
         # 本地标志
