@@ -129,7 +129,7 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
@@ -251,7 +251,12 @@ def _backend_health_payload(port: int, timeout: float = BACKEND_HEALTH_TIMEOUT) 
     if response is None or response.status_code != 200:
         return None
     try:
-        payload = response.json()
+        content = response.content
+        if isinstance(content, (bytes, bytearray)):
+            raw = content.decode("utf-8", errors="replace") if content else ""
+            payload = json.loads(raw) if raw else None
+        else:
+            payload = response.json()
     except (TypeError, ValueError):
         return None
     finally:
@@ -669,7 +674,7 @@ def _check_frontend_assets(runner: DoctorRunnerProtocol) -> None:
 
     version = ""
     try:
-        version = (frontend_dir / "version.txt").read_text(encoding="utf-8").strip()
+        version = (frontend_dir / "version.txt").read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         version = "unknown"
     runner.add(

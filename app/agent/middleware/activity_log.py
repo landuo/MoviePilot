@@ -6,6 +6,7 @@
 并在每次 Agent 启动时注入轻量索引，完整日志由工具按需查询。
 """
 
+import json
 import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -21,11 +22,15 @@ from langchain.agents.middleware.types import (
     ModelResponse,
     PrivateStateAttr,  # noqa
     ResponseT,
+    ToolCallRequest,
 )
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.runtime import Runtime
+from pydantic import BaseModel, Field
 
 from app.agent.middleware.utils import append_to_system_message
+from app.agent.tools.tags import ToolTag
 from app.log import logger
 
 # 活动日志保留天数
@@ -48,6 +53,13 @@ MAX_LOG_FILE_SIZE = 256 * 1024
 MAX_CONTEXT_FOR_SUMMARY = 4000
 
 SUMMARY_SKIP_MARKER = "SKIP"
+QUERY_ACTIVITY_LOG_TOOL_NAME = "query_activity_log"
+QUERY_ACTIVITY_LOG_TOOL_DESCRIPTION = (
+    "Query recent MoviePilot Agent activity logs on demand. Use this when the user asks what was done before, "
+    "asks to continue a previous task, or explicitly references recent agent activity. Supports keyword, date, "
+    "recent-day window, limit, and optional regex filters. If a keyword search returns no results, retry with "
+    "a shorter keyword, a larger days window, or no keyword to inspect recent entries."
+)
 
 # LLM 总结的提示词
 SUMMARY_PROMPT = """请判断以下 AI 助手与用户的对话是否值得写入 MoviePilot 活动日志。
@@ -69,6 +81,41 @@ SUMMARY_PROMPT = """请判断以下 AI 助手与用户的对话是否值得写�
 {conversation}"""
 
 ACTIVITY_ENTRY_PATTERN = re.compile(r"^-\s+\*\*(?P<time>\d{2}:\d{2})\*\*\s+(?P<summary>.+)$")
+
+
+class QueryActivityLogInput(BaseModel):
+    """查询活动日志工具的输入参数模型。"""
+
+    explanation: Optional[str] = Field(
+        None,
+        description="Clear explanation of why this tool is being used in the current context",
+    )
+    keyword: Optional[str] = Field(
+        None,
+        description=(
+            "Optional plain-text keyword to filter activity summaries. Use short title, path, site, task, "
+            "or status fragments; omit it to inspect latest entries."
+        ),
+    )
+    use_regex: Optional[bool] = Field(
+        False,
+        description=(
+            "Whether to treat keyword as a regular expression. Defaults to false; enable only for "
+            "alternative or pattern matching."
+        ),
+    )
+    date: Optional[str] = Field(
+        None,
+        description="Optional exact date in YYYY-MM-DD format. If omitted, recent days are searched.",
+    )
+    days: Optional[int] = Field(
+        DEFAULT_QUERY_DAYS,
+        description="Number of recent days to search when date is not specified.",
+    )
+    limit: Optional[int] = Field(
+        DEFAULT_QUERY_LIMIT,
+        description="Maximum number of activity entries to return.",
+    )
 
 
 def _coerce_query_limit(limit: Optional[int]) -> int:
@@ -133,7 +180,7 @@ def load_activity_log_index(activity_dir: str, days: int = PROMPT_LOAD_DAYS) -> 
         if not log_path.is_file():
             continue
         try:
-            content = log_path.read_text(encoding="utf-8")
+            content = log_path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             logger.warning(f"读取活动日志索引失败 {log_path}: {e}")
             continue
@@ -197,7 +244,7 @@ def query_activity_logs(
         if not log_path.is_file():
             continue
         try:
-            content = log_path.read_text(encoding="utf-8")
+            content = log_path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             logger.warning(f"读取活动日志失败 {log_path}: {e}")
             continue
@@ -223,6 +270,53 @@ def query_activity_logs(
         "truncated": total_count > normalized_limit,
         "entries": entries[:normalized_limit],
     }
+
+
+class _ActivityLogToolProvider:
+    """活动日志工具的查询实现。"""
+
+    def __init__(self, *, activity_dir: str) -> None:
+        """初始化活动日志查询目录。"""
+        self._activity_dir = activity_dir
+
+    async def query_activity_log(
+        self,
+        keyword: Optional[str] = None,
+        use_regex: Optional[bool] = False,
+        date: Optional[str] = None,
+        days: Optional[int] = DEFAULT_QUERY_DAYS,
+        limit: Optional[int] = DEFAULT_QUERY_LIMIT,
+        explanation: Optional[str] = None,
+    ) -> str:
+        """查询活动日志并返回 JSON 字符串。"""
+        logger.info(
+            "查询活动日志: keyword=%s, use_regex=%s, date=%s, days=%s, limit=%s, explanation=%s",
+            keyword,
+            use_regex,
+            date,
+            days,
+            limit,
+            explanation or "-",
+        )
+        try:
+            payload = query_activity_logs(
+                self._activity_dir,
+                keyword=keyword,
+                use_regex=bool(use_regex),
+                date=date,
+                days=days or DEFAULT_QUERY_DAYS,
+                limit=limit,
+            )
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception as err:
+            logger.error(f"查询活动日志失败: {err}", exc_info=True)
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": f"查询活动日志时发生错误: {str(err)}",
+                },
+                ensure_ascii=False,
+            )
 
 
 class ActivityLogState(AgentState):
@@ -373,17 +467,9 @@ ACTIVITY_LOG_SYSTEM_PROMPT = """<activity_log>
 </activity_log_index>
 
 <activity_log_guidelines>
-    Activity logs are automatically maintained by the system and are available for continuity, but full log contents are not injected into context by default.
-
-    **How to use this information:**
-    - The <activity_log_index> above only lists which recent dates have activity records and how many entries exist.
-    - Use `query_activity_log` when the user asks about previous work, asks to continue a prior task, or when recent activity is clearly relevant to the current request.
-    - To find related logs, start with a broad search: use the exact date if known; otherwise query recent days with a short keyword, or omit `keyword` and inspect the latest entries. If there are no matches, retry with a larger `days` value or a shorter object/path fragment.
-    - `query_activity_log.keyword` is a plain substring by default. Set `use_regex=true` only when matching alternatives or patterns such as multiple titles, paths, or task IDs.
-    - Do not query activity logs for routine standalone tasks such as file organization, media recognition, downloads, subscriptions, or diagnostics unless the user explicitly references prior activity.
-    - Activity logs are read-only from your perspective. Do not attempt to edit or write to activity log files.
-    - For long-term preferences and knowledge, continue to use MEMORY.md.
-    - Activity logs are retained for {retention_days} days and then automatically cleaned up.
+    The index only shows recent dates and entry counts, not full log contents.
+    Use `query_activity_log` only when the user references previous work, asks to continue a prior task, or recent activity is clearly relevant.
+    Activity logs are read-only and retained for {retention_days} days; use MEMORY.md for durable preferences.
 </activity_log_guidelines>
 </activity_log>
 """
@@ -410,10 +496,23 @@ class ActivityLogMiddleware(AgentMiddleware[ActivityLogState, ContextT, Response
         activity_dir: str,
         retention_days: int = DEFAULT_RETENTION_DAYS,
         prompt_load_days: int = PROMPT_LOAD_DAYS,
+        stream_handler: Optional[Any] = None,
     ) -> None:
+        """初始化活动日志中间件。"""
         self.activity_dir = activity_dir
         self.retention_days = retention_days
         self.prompt_load_days = prompt_load_days
+        self.stream_handler = stream_handler
+        self._tool_provider = _ActivityLogToolProvider(activity_dir=activity_dir)
+        self.tools = [
+            StructuredTool.from_function(
+                coroutine=self._tool_provider.query_activity_log,
+                name=QUERY_ACTIVITY_LOG_TOOL_NAME,
+                description=QUERY_ACTIVITY_LOG_TOOL_DESCRIPTION,
+                args_schema=QueryActivityLogInput,
+                tags=[ToolTag.Read, ToolTag.System],
+            )
+        ]
 
     def _get_log_path(self, date_str: str) -> AsyncPath:
         """获取指定日期的日志文件路径。"""
@@ -480,7 +579,7 @@ class ActivityLogMiddleware(AgentMiddleware[ActivityLogState, ContextT, Response
         entry = f"- **{now_str}** {summary}\n"
         try:
             if await log_path.exists():
-                existing = await log_path.read_text(encoding="utf-8")
+                existing = await log_path.read_text(encoding="utf-8", errors="replace")
                 await log_path.write_text(existing + entry, encoding="utf-8")
             else:
                 header = f"# {today_str} 活动日志\n\n"
@@ -551,6 +650,39 @@ class ActivityLogMiddleware(AgentMiddleware[ActivityLogState, ContextT, Response
         modified_request = self.modify_request(request)
         return await handler(modified_request)
 
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[Any]],
+    ) -> Any:
+        """在活动日志查询工具执行时记录聚合摘要。"""
+        tool = request.tool
+        tool_name = getattr(tool, "name", None)
+        if tool_name != QUERY_ACTIVITY_LOG_TOOL_NAME:
+            return await handler(request)
+
+        tool_call = request.tool_call or {}
+        tool_args = tool_call.get("args") or {}
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+        logger.info(
+            f"开始执行活动日志查询工具: keyword={tool_args.get('keyword') or '-'}, "
+            f"date={tool_args.get('date') or '-'}"
+        )
+        if self.stream_handler and getattr(self.stream_handler, "is_streaming", False):
+            self.stream_handler.record_tool_call(
+                tool_name=QUERY_ACTIVITY_LOG_TOOL_NAME,
+                tool_message=QUERY_ACTIVITY_LOG_TOOL_DESCRIPTION,
+                tool_kwargs=tool_args,
+            )
+        try:
+            result = await handler(request)
+        except Exception as err:
+            logger.error(f"活动日志查询工具执行失败: error={err}")
+            raise
+        logger.info("活动日志查询工具执行完成")
+        return result
+
     async def aafter_agent(
         self, state: ActivityLogState, runtime: Runtime
     ) -> Optional[dict[str, Any]]:
@@ -584,6 +716,7 @@ class ActivityLogMiddleware(AgentMiddleware[ActivityLogState, ContextT, Response
 
 __all__ = [
     "ActivityLogMiddleware",
+    "QUERY_ACTIVITY_LOG_TOOL_NAME",
     "load_activity_log_index",
     "query_activity_logs",
 ]
