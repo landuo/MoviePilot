@@ -173,7 +173,7 @@ class MessageChain(ChainBase):
         images = CommingMessage.MessageImage.normalize_list(images)
 
         processing_status = None
-        continues_async = False
+        processing_finish_deferred = False
         try:
             # 语音输入只用于转写为文本，不默认改变回复形式。
             has_audio_input = bool(audio_refs)
@@ -228,7 +228,7 @@ class MessageChain(ChainBase):
                     text=text,
                 )
 
-            continues_async = self._handle_message_core(
+            processing_finish_deferred = self._handle_message_core(
                 channel=channel,
                 source=source,
                 userid=userid,
@@ -241,9 +241,9 @@ class MessageChain(ChainBase):
                 files=files,
                 has_audio_input=has_audio_input,
                 processing_status=processing_status,
-            )
+            ) is True
         finally:
-            if continues_async is not True:
+            if not processing_finish_deferred:
                 self._mark_message_processing_finished(
                     channel=channel,
                     source=source,
@@ -1278,7 +1278,10 @@ class MessageChain(ChainBase):
             # 将可直接输入给 LLM 的附件统一转换为 data URL
             original_images = images
             all_files = list(files or [])
-            if images and LLMHelper.supports_image_input():
+            if images and LLMHelper.supports_image_input(
+                    provider=settings.LLM_PROVIDER,
+                    model=settings.LLM_MODEL,
+            ):
                 images = self._download_attachments_to_data_urls(
                     images, channel, source
                 )
