@@ -27,6 +27,26 @@ export PATH="${VENV_PATH}/bin:$PATH"
 # 校正设置目录
 CONFIG_DIR="${CONFIG_DIR:-/config}"
 
+function apply_package_cache_env() {
+    PACKAGE_CACHE_ROOT="${PACKAGE_CACHE_ROOT:-${CONFIG_DIR}/.cache}"
+    export PACKAGE_CACHE_ROOT
+    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${PACKAGE_CACHE_ROOT}/pip}"
+    export UV_CACHE_DIR="${UV_CACHE_DIR:-${PACKAGE_CACHE_ROOT}/uv}"
+    mkdir -p "${PIP_CACHE_DIR}" "${UV_CACHE_DIR}"
+}
+
+function run_package_command() {
+    if [ -n "${PROXY_HOST}" ]; then
+        HTTP_PROXY="${PROXY_HOST}" \
+            HTTPS_PROXY="${PROXY_HOST}" \
+            http_proxy="${PROXY_HOST}" \
+            https_proxy="${PROXY_HOST}" \
+            "$@"
+    else
+        "$@"
+    fi
+}
+
 # 环境变量补全
 # 优先级: 系统环境变量 -> .env 文件 (即使为空字符串) -> 预设默认值
 # 精准适配 Python 端 set_key (quote_mode="always", 单引号包裹, \' 转义)
@@ -39,6 +59,7 @@ function load_config_from_app_env() {
     declare -A vars_and_default_values=(
         # update.sh
         ["PIP_PROXY"]=""
+        ["PACKAGE_CACHE_ROOT"]=""
         ["GITHUB_PROXY"]=""
         ["PROXY_HOST"]=""
         ["GITHUB_TOKEN"]=""
@@ -413,11 +434,9 @@ function ensure_backend_runtime_dependencies() {
     local -a pip_cmd=("${VENV_PATH}/bin/pip" "install" "-r" "/app/requirements.txt")
     if [ -n "${PIP_PROXY}" ]; then
         pip_cmd+=("-i" "${PIP_PROXY}")
-    elif [ -n "${PROXY_HOST}" ]; then
-        pip_cmd+=("--proxy" "${PROXY_HOST}")
     fi
 
-    if ! "${pip_cmd[@]}" > /dev/stdout 2> /dev/stderr; then
+    if ! run_package_command "${pip_cmd[@]}" > /dev/stdout 2> /dev/stderr; then
         ERROR "→ 自动恢复主程序依赖失败，后端无法启动。"
         diagnostic_keepalive 1
     fi
@@ -432,6 +451,7 @@ function ensure_backend_runtime_dependencies() {
 
 # 使用env配置
 load_config_from_app_env
+apply_package_cache_env
 
 # 一次性升级标记仅影响本次启动，避免把临时升级模式带入运行中的 Python 进程
 ONE_SHOT_UPDATE_FLAG="${CONFIG_DIR}/temp/moviepilot.pending_update"
