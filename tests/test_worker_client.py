@@ -321,18 +321,18 @@ class ConcurrencyTest(_BaseWorkerClientTest):
 
         def _run():
             try:
-                with patch.object(httpx.Client, "get",
-                                  return_value=self._mock_response(200)):
-                    for _ in range(20):
-                        self.client.health_check()
+                for _ in range(20):
+                    self.client.health_check()
             except Exception as e:  # pragma: no cover - 并发出错才会进
                 errors.append(e)
 
-        threads = [threading.Thread(target=_run) for _ in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5)
+        with patch.object(httpx.Client, "get",
+                          return_value=self._mock_response(200)):
+            threads = [threading.Thread(target=_run) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
 
         self.assertEqual(errors, [])
         self.assertTrue(self.client.is_available())

@@ -78,6 +78,8 @@ def _load_lexiannot_tool_schemas() -> list[Type[BaseModel]]:
         / "lexiannot"
         / "schemas.py"
     )
+    if not schema_path.exists():
+        return []
     spec = importlib.util.spec_from_file_location(
         "_test_lexiannot_schemas",
         schema_path,
