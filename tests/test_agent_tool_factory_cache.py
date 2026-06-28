@@ -1,6 +1,6 @@
 import importlib.util
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator, Optional, Type
 
 import pytest
@@ -94,7 +94,7 @@ def _load_lexiannot_tool_schemas() -> list[Type[BaseModel]]:
 
 
 def test_agent_tool_schemas_do_not_expose_explanation_parameter() -> None:
-    """所有 Agent 工具输入模型都不应暴露 explanation 参数。"""
+    """仓库内置 Agent 工具和中间件输入模型不应暴露 explanation 参数。"""
     tool_classes = [
         *MoviePilotToolFactory.BUILTIN_TOOL_CLASSES,
         AskUserChoiceTool,
