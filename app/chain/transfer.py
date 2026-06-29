@@ -1917,9 +1917,11 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             sample_files.append(item)
         return sample_files
 
-    def process(self) -> bool:
+    def process(self, progress_callback: Optional[Callable[..., None]] = None) -> bool:
         """
         获取下载器中的种子列表，并执行整理
+
+        :param progress_callback: 定时服务进度更新回调
         """
         # 全局锁，避免定时服务重复
         with downloader_lock:
@@ -1931,9 +1933,13 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     dir_info.monitor_type == "downloader" and dir_info.storage == "local"
                     for dir_info in download_dirs
             ):
+                if progress_callback:
+                    progress_callback(value=100, text="未配置下载器监控目录，跳过整理")
                 return True
 
             logger.info("开始整理下载器中已经完成下载的文件 ...")
+            if progress_callback:
+                progress_callback(value=0, text="正在查询已完成下载任务 ...")
 
             # 从下载器获取种子列表
             if torrents_list := self.list_torrents(status=TorrentStatus.TRANSFER):
@@ -1951,14 +1957,38 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
 
             if not torrents:
                 logger.info("没有已完成下载但未整理的任务")
+                if progress_callback:
+                    progress_callback(value=100, text="没有已完成下载但未整理的任务")
                 return False
 
             logger.info(f"获取到 {len(torrents)} 个已完成的下载任务")
+            if progress_callback:
+                progress_callback(
+                    value=0,
+                    text=f"获取到 {len(torrents)} 个已完成下载任务",
+                    data={"total": len(torrents), "finished": 0},
+                )
 
             try:
-                for torrent in torrents:
+                total_num = len(torrents)
+                for index, torrent in enumerate(torrents, start=1):
                     if global_vars.is_system_stopped:
                         break
+                    if progress_callback:
+                        torrent_name = (
+                            getattr(torrent, "title", None)
+                            or getattr(torrent, "name", None)
+                            or torrent.hash
+                        )
+                        progress_callback(
+                            value=(index - 1) / total_num * 100,
+                            text=f"正在整理下载任务（{index}/{total_num}）{torrent_name} ...",
+                            data={
+                                "total": total_num,
+                                "finished": index - 1,
+                                "current": torrent.hash,
+                            },
+                        )
 
                     # 文件路径
                     file_path = torrent.path
@@ -2022,9 +2052,15 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                             extension=file_path.suffix.lstrip("."),
                         ),
                         mediainfo=mediainfo,
-                        downloader=torrent.downloader,
-                        download_hash=torrent.hash,
-                    )
+                            downloader=torrent.downloader,
+                            download_hash=torrent.hash,
+                        )
+                    if progress_callback:
+                        progress_callback(
+                            value=index / total_num * 100,
+                            text=f"下载任务（{index}/{total_num}）整理处理完成",
+                            data={"total": total_num, "finished": index},
+                        )
 
             finally:
                 torrents.clear()
@@ -2403,6 +2439,32 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             self.__normalize_dir_path(Path(current_item.path).parent),
         )
 
+    @staticmethod
+    def _get_subscribe_custom_words(
+            history_record: Optional[DownloadHistory],
+    ) -> Optional[List[str]]:
+        """
+        获取整理用自定义识别词：优先使用下载时保存的快照，无快照（历史旧记录）时再按来源实时反查订阅。
+
+        快照优先可避免整理阶段因订阅季号漂移、来源解析失败或订阅完成被删导致识别词丢失，从而原样入库到偏移前的季集。
+        """
+        if not history_record:
+            return None
+        # 下载时保存的完整订阅识别词快照优先
+        if history_record.custom_words:
+            return history_record.custom_words.split("\n")
+        # 兜底：历史旧记录无快照时，按下载来源实时反查订阅
+        if not isinstance(history_record.note, dict):
+            return None
+        subscribe = SubscribeChain().get_subscribe_by_source(
+            history_record.note.get("source")
+        )
+        return (
+            subscribe.custom_words.split("\n")
+            if subscribe and subscribe.custom_words
+            else None
+        )
+
     def do_transfer(
             self,
             fileitem: FileItem,
@@ -2478,24 +2540,6 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         )
         # 汇总错误信息
         err_msgs: List[str] = []
-
-        def _get_subscribe_custom_words(
-                history_record: Optional[DownloadHistory],
-        ) -> Optional[List[str]]:
-            """
-            根据下载记录获取订阅自定义识别词。
-            """
-            if not history_record or not isinstance(history_record.note, dict):
-                return None
-            # 使用source动态获取订阅
-            subscribe = SubscribeChain().get_subscribe_by_source(
-                history_record.note.get("source")
-            )
-            return (
-                subscribe.custom_words.split("\n")
-                if subscribe and subscribe.custom_words
-                else None
-            )
 
         def _build_file_meta(
                 source_path: Path,
@@ -2620,7 +2664,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             )
             return _build_file_meta(
                 main_path,
-                custom_word_list=_get_subscribe_custom_words(main_download_history),
+                custom_word_list=self._get_subscribe_custom_words(main_download_history),
             )
 
         def _append_item(
@@ -2778,7 +2822,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     bluray_dir=main_bluray_dir,
                     download_hash=download_hash,
                 )
-                subscribe_custom_words = _get_subscribe_custom_words(
+                subscribe_custom_words = self._get_subscribe_custom_words(
                     main_download_history
                 )
                 main_meta = _build_file_meta(
@@ -2901,7 +2945,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     else:
                         file_meta = _build_file_meta(
                             file_path,
-                            custom_word_list=_get_subscribe_custom_words(download_history),
+                            custom_word_list=self._get_subscribe_custom_words(download_history),
                         )
                 else:
                     file_meta = _build_file_meta(file_path)

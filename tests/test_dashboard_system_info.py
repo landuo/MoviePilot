@@ -30,6 +30,42 @@ def test_dashboard_system_info_returns_runtime_environment(monkeypatch):
     assert result.version == "v2.13.16"
 
 
+def test_memory_usage_returns_used_cached_and_available(monkeypatch):
+    """内存统计应返回应用进程占用以及系统缓存、可用和总容量。"""
+
+    class FakeMemoryInfo:
+        """提供固定进程 RSS 的桩。"""
+
+        rss = 2 * 1024**3
+
+    class FakeProcess:
+        """提供固定进程内存信息的桩。"""
+
+        @staticmethod
+        def memory_info() -> FakeMemoryInfo:
+            """返回固定进程内存信息。"""
+            return FakeMemoryInfo()
+
+    class FakeMemory:
+        """提供固定系统内存值的桩。"""
+
+        total = 16 * 1024**3
+        cached = 3 * 1024**3
+        buffers = 512 * 1024**2
+        available = 7 * 1024**3
+
+    monkeypatch.setattr(system_module.psutil, "Process", FakeProcess)
+    monkeypatch.setattr(system_module.psutil, "virtual_memory", FakeMemory)
+
+    result = SystemUtils.memory_usage()
+
+    assert result.total == 16 * 1024**3
+    assert result.used == 2 * 1024**3
+    assert result.cached == int(3.5 * 1024**3)
+    assert result.available == 7 * 1024**3
+    assert result.usage == 12.5
+
+
 def test_monthly_media_statistics_counts_successful_unique_media():
     """本月新增统计应只计算成功记录，并按媒体去重。"""
     month = system_module.time.strftime("%Y-%m-", system_module.time.localtime())

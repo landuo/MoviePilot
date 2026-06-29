@@ -158,6 +158,61 @@ def test_download_single_submits_download_added_to_background(monkeypatch):
     )
 
 
+def test_download_single_persists_custom_words_snapshot(monkeypatch):
+    """下载成功登记历史时，应把传入的订阅识别词原样存入快照，供整理时原样复现识别。"""
+    captured = {}
+
+    class _CapturingDownloadHistoryOper:
+        """捕获写入下载历史的字段，验证识别词快照确实落库。"""
+
+        def add(self, **kwargs):
+            captured.update(kwargs)
+
+        def add_files(self, _files):
+            pass
+
+    _FakeThreadHelper.submitted = []
+    monkeypatch.setattr(download_module, "ThreadHelper", _FakeThreadHelper)
+    monkeypatch.setattr(download_module, "DownloadHistoryOper", _CapturingDownloadHistoryOper)
+    monkeypatch.setattr(download_module, "TorrentHelper", _FakeTorrentHelper)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.download = MagicMock(return_value=("qb", "hash123", "Original", "添加下载成功"))
+    chain.download_added = MagicMock()
+    chain.eventmanager = MagicMock()
+    chain.eventmanager.send_event.return_value = None
+    chain.post_message = MagicMock()
+
+    context = Context(
+        meta_info=MetaInfo("Demo Show 2024"),
+        media_info=MediaInfo(
+            type=MediaType.TV,
+            title="Demo Show",
+            year="2024",
+            tmdb_id=1,
+            genre_ids=[18],
+        ),
+        torrent_info=TorrentInfo(
+            title="Demo Show 2024",
+            enclosure="https://example.com/demo.torrent",
+            site_cookie="uid=1",
+            site_name="TestSite",
+        ),
+    )
+
+    custom_words = "S04 => S01\n第 <> 集 >> EP+66"
+    result = chain.download_single(
+        context=context,
+        torrent_content=b"torrent-content",
+        save_path="/downloads",
+        username="tester",
+        custom_words=custom_words,
+    )
+
+    assert result == "hash123"
+    assert captured["custom_words"] == custom_words
+
+
 def test_save_subtitle_response_creates_missing_temp_directory(monkeypatch, tmp_path):
     """
     下载字幕 API 保存响应前应自动创建缺失的临时目录。
@@ -330,6 +385,7 @@ def _build_tv_context(episode_list=None):
         ),
         torrent_info=SimpleNamespace(title="Test Show S01 2160p", site_name="TestSite"),
         allowed_episodes=None,
+        confirmed_full_coverage=False,
     )
 
 
@@ -362,6 +418,40 @@ def test_batch_download_rejects_complete_coverage_when_files_do_not_cover_target
 
     assert downloads == []
     assert lefts == no_exists
+    assert context.confirmed_full_coverage is False
+    chain.download_single.assert_not_called()
+
+
+def test_batch_download_rejects_complete_coverage_when_only_missing_episodes_match(monkeypatch):
+    """
+    完整覆盖要求目标范围全集，不能只覆盖当前缺口集。
+    """
+    _FakeBatchTorrentHelper.episodes = [4, 5]
+    monkeypatch.setattr(download_module, "TorrentHelper", _FakeBatchTorrentHelper)
+    monkeypatch.setattr(download_module.eventmanager, "send_event", lambda *args, **kwargs: None)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.download_torrent = MagicMock(return_value=(b"torrent-content", "", ["demo.mkv"]))
+    chain.download_single = MagicMock(return_value="hash")
+
+    context = _build_tv_context()
+    no_exists = {
+        1: {
+            1: NotExistMediaInfo(
+                season=1,
+                episodes=[4, 5],
+                total_episode=5,
+                start_episode=1,
+                require_complete_coverage=True,
+            )
+        }
+    }
+
+    downloads, lefts = chain.batch_download(contexts=[context], no_exists=no_exists)
+
+    assert downloads == []
+    assert lefts == no_exists
+    assert context.confirmed_full_coverage is False
     chain.download_single.assert_not_called()
 
 
@@ -433,6 +523,29 @@ def test_batch_download_does_not_download_duplicate_movie_after_success(monkeypa
     assert chain.download_single.call_args.args[0] is first_context
 
 
+def test_batch_download_threads_custom_words_to_download_single(monkeypatch):
+    """订阅识别词须经 batch_download 透传到 download_single，作为整理快照随下载存档。"""
+    _FakeBatchTorrentHelper.episodes = []
+    monkeypatch.setattr(download_module, "TorrentHelper", _FakeBatchTorrentHelper)
+    monkeypatch.setattr(download_module.eventmanager, "send_event", lambda *args, **kwargs: None)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.download_single = MagicMock(return_value="hash")
+
+    context = SimpleNamespace(
+        media_info=SimpleNamespace(type=MediaType.MOVIE, title_year="Demo Movie (2026)"),
+        meta_info=SimpleNamespace(season_episode=""),
+        torrent_info=SimpleNamespace(title="Demo Movie"),
+    )
+
+    custom_words = "S04 => S01\n第 <> 集 >> EP+66"
+    downloads, _lefts = chain.batch_download(contexts=[context], custom_words=custom_words)
+
+    assert downloads == [context]
+    chain.download_single.assert_called_once()
+    assert chain.download_single.call_args.kwargs["custom_words"] == custom_words
+
+
 def test_batch_download_accepts_complete_coverage_when_files_cover_target_range(monkeypatch):
     """
     自定义起始集场景按目标范围覆盖判断，100-143 可满足 start=100、total=143。
@@ -462,7 +575,41 @@ def test_batch_download_accepts_complete_coverage_when_files_cover_target_range(
 
     assert downloads == [context]
     assert lefts == {}
+    assert context.confirmed_full_coverage is True
     chain.download_single.assert_called_once()
+
+
+def test_batch_download_rejects_complete_coverage_when_files_have_same_count_but_wrong_range(monkeypatch):
+    """
+    完整覆盖按目标集号集合判断，不能让同数量的偏移局部包通过。
+    """
+    _FakeBatchTorrentHelper.episodes = list(range(1, 45))
+    monkeypatch.setattr(download_module, "TorrentHelper", _FakeBatchTorrentHelper)
+    monkeypatch.setattr(download_module.eventmanager, "send_event", lambda *args, **kwargs: None)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.download_torrent = MagicMock(return_value=(b"torrent-content", "", ["demo.mkv"]))
+    chain.download_single = MagicMock(return_value="hash")
+
+    context = _build_tv_context()
+    no_exists = {
+        1: {
+            1: NotExistMediaInfo(
+                season=1,
+                episodes=[],
+                total_episode=143,
+                start_episode=100,
+                require_complete_coverage=True,
+            )
+        }
+    }
+
+    downloads, lefts = chain.batch_download(contexts=[context], no_exists=no_exists)
+
+    assert downloads == []
+    assert lefts == no_exists
+    assert context.confirmed_full_coverage is False
+    chain.download_single.assert_not_called()
 
 
 def test_batch_download_accepts_complete_coverage_when_title_episodes_cover_target(monkeypatch):
@@ -494,6 +641,7 @@ def test_batch_download_accepts_complete_coverage_when_title_episodes_cover_targ
 
     assert downloads == [context]
     assert lefts == {}
+    assert context.confirmed_full_coverage is True
     chain.download_torrent.assert_not_called()
     chain.download_single.assert_called_once()
 
@@ -527,6 +675,7 @@ def test_batch_download_rejects_complete_coverage_when_title_episodes_are_partia
 
     assert downloads == []
     assert lefts == no_exists
+    assert context.confirmed_full_coverage is False
     chain.download_torrent.assert_not_called()
     chain.download_single.assert_not_called()
 
@@ -561,6 +710,7 @@ def test_batch_download_complete_coverage_ignores_allowed_episode_narrowing(monk
 
     assert downloads == []
     assert lefts == no_exists
+    assert context.confirmed_full_coverage is False
     chain.download_torrent.assert_not_called()
     chain.download_single.assert_not_called()
 
@@ -593,4 +743,5 @@ def test_batch_download_keeps_count_check_without_complete_coverage(monkeypatch)
 
     assert downloads == [context]
     assert lefts == {}
+    assert context.confirmed_full_coverage is False
     chain.download_single.assert_called_once()
