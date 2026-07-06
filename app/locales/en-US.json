@@ -424,6 +424,14 @@
       "target": "{path} is not a file"
     },
     {
+      "source": "未注册 worker={worker} 的回调处理函数",
+      "target": "No callback handler is registered for worker={worker}"
+    },
+    {
+      "source": "非法 JSON 载荷：{reason}",
+      "target": "Invalid JSON payload: {reason}"
+    },
+    {
       "source": "智能助手执行失败: {reason}",
       "target": "Assistant execution failed: {reason}"
     },

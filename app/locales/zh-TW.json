@@ -424,6 +424,14 @@
       "target": "{path} 不是檔案"
     },
     {
+      "source": "未注册 worker={worker} 的回调处理函数",
+      "target": "未註冊 worker={worker} 的回調處理函式"
+    },
+    {
+      "source": "非法 JSON 载荷：{reason}",
+      "target": "非法 JSON 載荷：{reason}"
+    },
+    {
       "source": "智能助手执行失败: {reason}",
       "target": "智慧助手執行失敗: {reason}"
     },

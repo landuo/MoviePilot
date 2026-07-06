@@ -107,6 +107,14 @@
   },
   "message_patterns": [
     {
+      "source": "未注册 worker={worker} 的回调处理函数",
+      "target": "未注册 worker={worker} 的回调处理函数"
+    },
+    {
+      "source": "非法 JSON 载荷：{reason}",
+      "target": "非法 JSON 载荷：{reason}"
+    },
+    {
       "source": "无法连接Qbittorrent下载器：{name}",
       "target": "无法连接Qbittorrent下载器：{name}"
     },
