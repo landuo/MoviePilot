@@ -12,9 +12,11 @@ from app.core.config import settings
 from app.core.event import eventmanager
 from app.core.metainfo import MetaInfo
 from app.core.security import verify_resource_token, verify_token
+from app.helper.locale import LocaleHelper
 from app.log import logger
 from app.schemas import MediaRecognizeConvertEventData
 from app.schemas.types import MediaType, ChainEventType
+from app.utils.security import SecurityUtils
 
 router = APIRouter()
 
@@ -38,11 +40,65 @@ def _parse_media_type(mtype: Optional[str]) -> Optional[MediaType]:
     return MediaType.from_agent(mtype) or MediaType(mtype)
 
 
-def _sse_event(data: dict) -> str:
+def _sse_event(data: dict, locale: Optional[str] = None) -> str:
     """
     转换为SSE事件
     """
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+    payload = data
+    message = payload.get("message")
+    text = payload.get("text")
+    if isinstance(message, str) or isinstance(text, str):
+        payload = data.copy()
+        if isinstance(message, str):
+            payload["message_i18n"] = LocaleHelper.translate_text(
+                message, locale=locale
+            )
+        if isinstance(text, str):
+            payload["text_i18n"] = LocaleHelper.translate_text(text, locale=locale)
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _serialize_signed_subtitle_result(subtitle: Any) -> dict:
+    """
+    序列化字幕结果并签名下载链接，签名用途绑定站点 ID。
+    """
+    data = subtitle.to_dict() if hasattr(subtitle, "to_dict") else dict(subtitle)
+    enclosure = data.get("enclosure")
+    if enclosure:
+        data["enclosure"] = SecurityUtils.sign_url(
+            enclosure,
+            purpose=SecurityUtils.subtitle_download_purpose(data.get("site")),
+        )
+    return data
+
+
+def _serialize_signed_subtitle_results(subtitles: List[Any]) -> List[dict]:
+    """
+    批量序列化字幕结果，确保返回给客户端的下载链接均已签名。
+    """
+    return [_serialize_signed_subtitle_result(subtitle) for subtitle in subtitles]
+
+
+def _sign_subtitle_search_event(event: dict) -> dict:
+    """
+    签名字幕搜索流事件中的下载链接。
+    """
+    signed_event = dict(event)
+    if "items" in signed_event:
+        signed_event["items"] = _serialize_signed_subtitle_results(
+            signed_event.get("items") or []
+        )
+    return signed_event
+
+
+async def _iter_signed_subtitle_search_events(
+    event_source: AsyncIterator[dict],
+) -> AsyncIterator[dict]:
+    """
+    输出仅包含签名字幕下载链接的搜索流事件。
+    """
+    async for event in event_source:
+        yield _sign_subtitle_search_event(event)
 
 
 def _merge_append_event(pending_event: Optional[dict], event: dict) -> dict:
@@ -123,6 +179,7 @@ async def _stream_search_events(request: Request, event_source: AsyncIterator[di
     """
     输出搜索SSE事件
     """
+    locale = LocaleHelper.get_locale_from_request(request)
     try:
         has_sent_final_replace = False
         async for event in _iter_batched_search_events(event_source):
@@ -138,10 +195,13 @@ async def _stream_search_events(request: Request, event_source: AsyncIterator[di
                 and event.get("items")
             ):
                 event = {key: value for key, value in event.items() if key != "items"}
-            yield _sse_event(event)
+            yield _sse_event(event, locale=locale)
     except Exception as err:
         logger.error(f"渐进式搜索出错：{err}", exc_info=True)
-        yield _sse_event({"type": "error", "success": False, "message": str(err)})
+        yield _sse_event(
+            {"type": "error", "success": False, "message": str(err)},
+            locale=locale,
+        )
 
 
 @router.get("/last", summary="查询搜索结果", response_model=List[schemas.Context])
@@ -168,7 +228,9 @@ async def search_latest_context(_: schemas.TokenPayload = Depends(verify_token))
         success=True,
         data={
             "params": params,
-            "results": [result.to_dict() for result in results],
+            "results": _serialize_signed_subtitle_results(results)
+            if params.get("result_type") == "subtitle"
+            else [result.to_dict() for result in results],
         },
     )
 
@@ -625,7 +687,11 @@ async def search_subtitle_by_title_stream(
         title=keyword, page=page, sites=_parse_site_list(sites), cache_local=True
     )
     return StreamingResponse(
-        _stream_search_events(request, event_source), media_type="text/event-stream"
+        _stream_search_events(
+            request,
+            _iter_signed_subtitle_search_events(event_source),
+        ),
+        media_type="text/event-stream",
     )
 
 
@@ -645,7 +711,7 @@ async def search_subtitle_by_title(
     if not subtitles:
         return schemas.Response(success=False, message="未搜索到任何字幕")
     return schemas.Response(
-        success=True, data=[subtitle.to_dict() for subtitle in subtitles]
+        success=True, data=_serialize_signed_subtitle_results(subtitles)
     )
 
 
@@ -798,7 +864,11 @@ async def search_subtitle_by_id_stream(
             yield event
 
     return StreamingResponse(
-        _stream_search_events(request, event_source()), media_type="text/event-stream"
+        _stream_search_events(
+            request,
+            _iter_signed_subtitle_search_events(event_source()),
+        ),
+        media_type="text/event-stream",
     )
 
 
@@ -832,7 +902,7 @@ async def search_subtitle_by_id(
     if not subtitles:
         return schemas.Response(success=False, message="未搜索到任何字幕")
     return schemas.Response(
-        success=True, data=[subtitle.to_dict() for subtitle in subtitles]
+        success=True, data=_serialize_signed_subtitle_results(subtitles)
     )
 
 

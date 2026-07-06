@@ -6,14 +6,16 @@ from sqlalchemy.orm import Session
 
 from app import schemas
 from app.chain.media import MediaChain
-from app.chain.storage import StorageChain
 from app.chain.transfer import TransferChain
 from app.core.config import settings, global_vars
 from app.core.security import verify_token, verify_apitoken
 from app.db import get_db
 from app.db.models import User
 from app.db.models.transferhistory import TransferHistory
-from app.db.user_oper import get_current_active_superuser
+from app.db.user_oper import (
+    get_current_active_manage_user,
+    get_current_active_superuser,
+)
 from app.helper.directory import DirectoryHelper
 from app.log import logger
 from app.schemas import (
@@ -183,7 +185,7 @@ def _get_manual_transfer_target_key(
 def match_manual_transfer_target_path(
     transer_item: ManualTransferItem,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_active_superuser),
+    _: User = Depends(get_current_active_manage_user),
 ) -> Any:
     """
     根据源文件匹配手动整理目的路径。
@@ -243,7 +245,7 @@ def manual_transfer(
     transer_item: ManualTransferItem,
     background: Optional[bool] = False,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_active_superuser),
+    _: User = Depends(get_current_active_manage_user),
 ) -> Any:
     """
     手动转移，文件或历史记录，支持自定义剧集识别格式
@@ -256,6 +258,7 @@ def manual_transfer(
     downloader = None
     download_hash = None
     src_fileitems: List[FileItem] = []
+    cleanup_dest_fileitem: Optional[FileItem] = None
     target_path = Path(transer_item.target_path) if transer_item.target_path else None
     if transer_item.logid:
         # 查询历史记录
@@ -274,15 +277,8 @@ def manual_transfer(
         else:
             # 源路径
             src_fileitems = [FileItem(**history.src_fileitem)]
-            # 目的路径
             if history.dest_fileitem and not transer_item.preview:
-                # 删除旧的已整理文件
-                dest_fileitem = FileItem(**history.dest_fileitem)
-                state = StorageChain().delete_media_file(dest_fileitem)
-                if not state:
-                    return schemas.Response(
-                        success=False, message=f"{dest_fileitem.path} 删除失败"
-                    )
+                cleanup_dest_fileitem = FileItem(**history.dest_fileitem)
 
         # 从历史数据获取信息
         if transer_item.from_history:
@@ -427,6 +423,7 @@ def manual_transfer(
                 download_hash=download_hash,
                 preview=transer_item.preview,
                 sync_extra_files=False,
+                cleanup_dest_fileitem=cleanup_dest_fileitem,
             )
             if transer_item.preview:
                 if isinstance(errormsg, dict):
@@ -508,6 +505,7 @@ def manual_transfer(
         download_hash=download_hash,
         preview=transer_item.preview,
         sync_extra_files=True,
+        cleanup_dest_fileitem=cleanup_dest_fileitem,
     )
     # 失败
     if not state:
@@ -533,7 +531,7 @@ def manual_transfer(
 )
 def recommend_episode_format(
     recommend_item: EpisodeFormatRecommendItem,
-    _: User = Depends(get_current_active_superuser),
+    _: User = Depends(get_current_active_manage_user),
 ) -> Any:
     """
     根据目录样本推荐集数定位模板
