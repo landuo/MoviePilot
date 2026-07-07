@@ -20,6 +20,10 @@ function WARN() {
     echo -e "${WARN} ${1}"
 }
 
+function lower_value() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 # 设置虚拟环境路径（兼容群晖等系统必须这样配置）
 VENV_PATH="${VENV_PATH:-/opt/venv}"
 export PATH="${VENV_PATH}/bin:$PATH"
@@ -65,6 +69,7 @@ function load_config_from_app_env() {
         ["GITHUB_TOKEN"]=""
         ["MOVIEPILOT_AUTO_UPDATE"]="release"
         ["MOVIEPILOT_DOCKER_KEEPALIVE_ON_FAILURE"]="true"
+        ["MOVIEPILOT_FORCE_CHOWN"]="false"
         ["MOVIEPILOT_SAFE_MODE"]="false"
         ["BROWSER_EMULATION"]="cloakbrowser"
 
@@ -181,8 +186,46 @@ function load_config_from_app_env() {
     INFO "配置加载流程执行完毕。"
 }
 
-# 用于记录已启动的 worker PID（按 worker 名索引）
-declare -gA WORKER_PIDS=()
+# 用于记录已启动的 worker PID。
+# 这里避免在 source 阶段使用 Bash 4 才支持的关联数组，保证本地测试可在 macOS Bash 3.2 下运行。
+WORKER_STARTED_NAMES=""
+WORKER_WATCHER_PID=""
+WORKER_TRANSFER_PID=""
+WORKER_INDEXER_PID=""
+
+function record_worker_pid() {
+    local name="$1"
+    local pid="$2"
+
+    WORKER_STARTED_NAMES="${WORKER_STARTED_NAMES} ${name}"
+    case "${name}" in
+        watcher)
+            WORKER_WATCHER_PID="${pid}"
+            ;;
+        transfer)
+            WORKER_TRANSFER_PID="${pid}"
+            ;;
+        indexer)
+            WORKER_INDEXER_PID="${pid}"
+            ;;
+    esac
+}
+
+function get_worker_pid() {
+    local name="$1"
+
+    case "${name}" in
+        watcher)
+            printf '%s' "${WORKER_WATCHER_PID}"
+            ;;
+        transfer)
+            printf '%s' "${WORKER_TRANSFER_PID}"
+            ;;
+        indexer)
+            printf '%s' "${WORKER_INDEXER_PID}"
+            ;;
+    esac
+}
 
 # 判断指定的 worker 是否应该启动
 # WORKER_ENABLED 兼容三种格式（与 app/core/config.py:_normalize_worker_enabled 对齐）：
@@ -232,8 +275,9 @@ function start_workers() {
                 --callback-url="http://127.0.0.1:${PORT}/api/v1/worker_callback/watcher" \
                 --log-format=json \
                 > /dev/stdout 2> /dev/stderr &
-            WORKER_PIDS["watcher"]=$!
-            INFO "→ mp-watcher 已启动 (PID: ${WORKER_PIDS["watcher"]})"
+            local worker_pid=$!
+            record_worker_pid "watcher" "${worker_pid}"
+            INFO "→ mp-watcher 已启动 (PID: ${worker_pid})"
         fi
     fi
 
@@ -248,8 +292,9 @@ function start_workers() {
                 --socket="${sock_dir}/mp-transfer.sock" \
                 --log-format=json \
                 > /dev/stdout 2> /dev/stderr &
-            WORKER_PIDS["transfer"]=$!
-            INFO "→ mp-transfer 已启动 (PID: ${WORKER_PIDS["transfer"]})"
+            local worker_pid=$!
+            record_worker_pid "transfer" "${worker_pid}"
+            INFO "→ mp-transfer 已启动 (PID: ${worker_pid})"
         fi
     fi
 
@@ -264,8 +309,9 @@ function start_workers() {
                 --socket="${sock_dir}/mp-indexer.sock" \
                 --log-format=json \
                 > /dev/stdout 2> /dev/stderr &
-            WORKER_PIDS["indexer"]=$!
-            INFO "→ mp-indexer 已启动 (PID: ${WORKER_PIDS["indexer"]})"
+            local worker_pid=$!
+            record_worker_pid "indexer" "${worker_pid}"
+            INFO "→ mp-indexer 已启动 (PID: ${worker_pid})"
         fi
     fi
 
@@ -273,7 +319,7 @@ function start_workers() {
     local i=0
     while [ $i -lt 20 ]; do
         local ready=true
-        for name in "${!WORKER_PIDS[@]}"; do
+        for name in ${WORKER_STARTED_NAMES}; do
             if [ ! -S "${sock_dir}/mp-${name}.sock" ]; then
                 ready=false
                 break
@@ -283,19 +329,20 @@ function start_workers() {
         sleep 0.5
         i=$((i+1))
     done
-    if [ ${#WORKER_PIDS[@]} -gt 0 ]; then
+    if [ -n "${WORKER_STARTED_NAMES}" ]; then
         INFO "→ Worker socket 就绪检查完成"
     fi
 }
 
 # 停止所有 worker 子进程
 function stop_workers() {
-    if [ ${#WORKER_PIDS[@]} -eq 0 ]; then
+    if [ -z "${WORKER_STARTED_NAMES}" ]; then
         return 0
     fi
     INFO "→ 正在关闭 worker 子进程..."
-    for name in "${!WORKER_PIDS[@]}"; do
-        local pid="${WORKER_PIDS[$name]}"
+    for name in ${WORKER_STARTED_NAMES}; do
+        local pid
+        pid="$(get_worker_pid "${name}")"
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
             INFO "  - 关闭 mp-${name} (PID: $pid)"
             kill -TERM "$pid" 2>/dev/null || true
@@ -396,7 +443,7 @@ function graceful_exit() {
 function diagnostic_keepalive() {
     local exit_code=${1:-1}
     local keepalive="${MOVIEPILOT_DOCKER_KEEPALIVE_ON_FAILURE:-true}"
-    keepalive="${keepalive,,}"
+    keepalive="$(lower_value "${keepalive}")"
 
     if [ "${keepalive}" = "false" ] || [ "${keepalive}" = "0" ] || [ "${keepalive}" = "no" ]; then
         graceful_exit "$exit_code" "python_exit"
@@ -449,6 +496,70 @@ function ensure_backend_runtime_dependencies() {
     INFO "→ 已自动恢复主程序依赖，继续启动后端。"
 }
 
+function force_chown_image_paths_if_requested() {
+    local force="${MOVIEPILOT_FORCE_CHOWN:-false}"
+    force="$(lower_value "${force}")"
+
+    if [ "${force}" != "true" ] && [ "${force}" != "1" ] && [ "${force}" != "yes" ]; then
+        return 0
+    fi
+
+    WARN "→ MOVIEPILOT_FORCE_CHOWN 已启用，将递归修复 /app、/public 权限，可能显著增加启动耗时。"
+
+    local path
+    for path in "$@"; do
+        [ -e "${path}" ] || continue
+        chown -R moviepilot:moviepilot "${path}"
+    done
+}
+
+function correct_home_permissions() {
+    [ -e "${HOME}" ] || return 0
+
+    local force="${MOVIEPILOT_FORCE_CHOWN:-false}"
+    force="$(lower_value "${force}")"
+
+    chown moviepilot:moviepilot "${HOME}"
+    [ -e "${HOME}/.cloakbrowser" ] && chown -h moviepilot:moviepilot "${HOME}/.cloakbrowser"
+
+    if [ "${force}" = "true" ] || [ "${force}" = "1" ] || [ "${force}" = "yes" ]; then
+        [ -e "${HOME}/.cloakbrowser" ] && chown -R moviepilot:moviepilot "${HOME}/.cloakbrowser"
+    elif [ -e "${HOME}/.cloakbrowser" ]; then
+        INFO "→ 默认跳过 ${HOME}/.cloakbrowser 递归权限校正，如遇浏览器缓存权限错误可设置 MOVIEPILOT_FORCE_CHOWN=true 后重启一次。"
+    fi
+
+    find "${HOME}" -mindepth 1 -maxdepth 1 ! -name ".cloakbrowser" -exec chown -R moviepilot:moviepilot {} +
+}
+
+function chown_plugin_runtime_path() {
+    local plugin_path="${1:-}"
+    [ -n "${plugin_path}" ] || return 0
+    [ -e "${plugin_path}" ] || return 0
+    local current_owner
+    current_owner="$(stat -c '%u:%g' "${plugin_path}" 2>/dev/null || stat -f '%u:%g' "${plugin_path}" 2>/dev/null || true)"
+    [ "${current_owner}" = "${PUID}:${PGID}" ] && return 0
+    chown -h moviepilot:moviepilot "${plugin_path}"
+}
+
+function correct_file_permissions() {
+    local chown_start
+    local chown_end
+    chown_start=$(date +%s)
+
+    INFO "→ 正在校正文件权限..."
+    force_chown_image_paths_if_requested /app /public
+    chown_plugin_runtime_path /app/app/plugins
+    correct_home_permissions
+    chown -R moviepilot:moviepilot \
+        "${CONFIG_DIR}" \
+        /var/lib/nginx \
+        /var/log/nginx
+    chown moviepilot:moviepilot /etc/hosts /tmp
+
+    chown_end=$(date +%s)
+    INFO "→ 文件权限校正完成，耗时 $(( chown_end - chown_start )) 秒。"
+}
+
 # 使用env配置
 load_config_from_app_env
 apply_package_cache_env
@@ -488,14 +599,7 @@ groupmod -o -g "${PGID}" moviepilot
 usermod -o -u "${PUID}" moviepilot
 
 # 更改文件权限
-chown -R moviepilot:moviepilot \
-    "${HOME}" \
-    /app \
-    /public \
-    "${CONFIG_DIR}" \
-    /var/lib/nginx \
-    /var/log/nginx
-chown moviepilot:moviepilot /etc/hosts /tmp
+correct_file_permissions
 
 # 启动前优先确认主运行环境仍然健康，避免插件依赖污染导致服务直接起不来。
 ensure_backend_runtime_dependencies
@@ -503,7 +607,7 @@ ensure_backend_runtime_dependencies
 # 下载浏览器内核
 function install_browser_kernel() {
   local emulation="${BROWSER_EMULATION:-cloakbrowser}"
-  emulation="${emulation,,}"
+  emulation="$(lower_value "${emulation}")"
   local proxy="${HTTPS_PROXY:-${https_proxy:-$PROXY_HOST}}"
 
   if [ "${emulation}" != "cloakbrowser" ] && [ "${emulation}" != "flaresolverr" ] && [ -n "${emulation}" ]; then

@@ -1184,6 +1184,7 @@ class SubscribeChain(ChainBase):
                         )
                     mediakey = subscribe.tmdbid or subscribe.doubanid
                     custom_word_list = subscribe.custom_words.split("\n") if subscribe.custom_words else None
+                    search_attempted = False
                     # 校验当前时间减订阅创建时间是否大于1分钟，否则跳过先，留出编辑订阅的时间
                     if subscribe.date:
                         now = datetime.now()
@@ -1197,6 +1198,7 @@ class SubscribeChain(ChainBase):
                     # 现已改为在 SearchChain 内部按关键字粒度做最小间隔限流（_keyword_search_limiter），
                     # 既能避免站点风控，又不会全局阻塞。
                     try:
+                        search_attempted = True
                         logger.info(f'开始搜索订阅，标题：{subscribe.name} ...')
                         try:
                             meta = build_subscribe_meta(subscribe)
@@ -1340,7 +1342,7 @@ class SubscribeChain(ChainBase):
                                                          downloads=downloads, lefts=lefts)
                     finally:
                         # 如果状态为N则更新为R
-                        if subscribe and subscribe.state == 'N':
+                        if search_attempted and subscribe and subscribe.state == 'N':
                             subscribeoper.update(subscribe.id, {'state': 'R'})
                         if progress_callback:
                             progress_callback(
