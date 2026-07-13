@@ -1,5 +1,5 @@
-APP_VERSION = 'v2.14.2'
-FRONTEND_VERSION = 'v2.14.2'
+APP_VERSION = 'v2.14.3'
+FRONTEND_VERSION = 'v2.14.3'
 
 # Worker 二进制版本，对应 release tag（默认仓库 landuo/MoviePilot，
 # 可通过 docker build --build-arg WORKERS_REPO=<owner/repo> 覆盖到任意 fork）
