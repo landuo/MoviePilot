@@ -22,6 +22,14 @@ class DownloadHistory(BaseModel):
     tvdbid: Optional[int] = None
     # 豆瓣ID
     doubanid: Optional[str] = None
+    # Bangumi ID
+    bangumiid: Optional[int] = None
+    # AniList ID
+    anilistid: Optional[int] = None
+    # 媒体数据源
+    media_source: Optional[str] = None
+    # 数据源原生ID
+    media_id: Optional[str] = None
     # 季Sxx
     seasons: Optional[str] = None
     # 集Exx
@@ -55,6 +63,10 @@ class DownloadHistory(BaseModel):
 
 
 class TransferHistory(BaseModel):
+    """
+    文件整理历史记录
+    """
+
     # ID
     id: int
     # 源目录
@@ -79,6 +91,14 @@ class TransferHistory(BaseModel):
     tvdbid: Optional[int] = None
     # 豆瓣ID
     doubanid: Optional[str] = None
+    # Bangumi ID
+    bangumiid: Optional[int] = None
+    # AniList ID
+    anilistid: Optional[int] = None
+    # 媒体数据源
+    media_source: Optional[str] = None
+    # 数据源原生ID
+    media_id: Optional[str] = None
     # 季Sxx
     seasons: Optional[str] = None
     # 集Exx

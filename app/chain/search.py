@@ -25,6 +25,7 @@ from app.log import logger
 from app.schemas import NotExistMediaInfo
 from app.schemas.types import MediaType, ProgressKey, SystemConfigKey, EventType
 from app.utils.limit import MinIntervalLimiter
+from app.utils.media import build_media_key, resolve_media_identity
 from app.utils.string import StringUtils
 
 # 多关键字搜索之间的最小间隔限流器，用于平滑请求节奏避免站点风控
@@ -177,16 +178,38 @@ class SearchChain(ChainBase):
 
     @staticmethod
     def _build_search_keyword(
-            tmdbid: Optional[int] = None, doubanid: Optional[str] = None
+            source: Optional[str] = None,
+            mediaid: Optional[str] = None,
+            tmdbid: Optional[int] = None,
+            doubanid: Optional[str] = None,
+            bangumiid: Optional[int] = None,
+            anilistid: Optional[int] = None,
     ) -> str:
         """
         根据媒体ID生成可重放的搜索关键字。
         """
-        if tmdbid is not None:
-            return f"tmdb:{tmdbid}"
-        if doubanid:
-            return f"douban:{doubanid}"
-        return ""
+        media_source, media_id = resolve_media_identity(
+            source=source,
+            media_id=mediaid,
+            tmdbid=tmdbid,
+            doubanid=doubanid,
+            bangumiid=bangumiid,
+            anilistid=anilistid,
+        )
+        return build_media_key(media_source, media_id)
+
+    @staticmethod
+    def _media_recognize_kwargs(mediainfo: MediaInfo) -> dict:
+        """从统一媒体信息构造完整的识别 ID 参数。"""
+        media_source, media_id = resolve_media_identity(media=mediainfo)
+        return {
+            "source": media_source,
+            "mediaid": media_id,
+            "tmdbid": mediainfo.tmdb_id,
+            "doubanid": mediainfo.douban_id,
+            "bangumiid": mediainfo.bangumi_id,
+            "anilistid": mediainfo.anilist_id,
+        }
 
     @staticmethod
     def _stringify_sites(sites: Optional[List[int]]) -> str:
@@ -494,13 +517,22 @@ class SearchChain(ChainBase):
 
         state._ai_recommend_task = asyncio.create_task(run_recommend())
 
-    def search_by_id(self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
-                     mtype: MediaType = None, area: Optional[str] = "title", season: Optional[int] = None,
-                     sites: List[int] = None, cache_local: bool = False) -> List[Context]:
+    def search_by_id(
+            self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
+            mtype: MediaType = None, area: Optional[str] = "title",
+            season: Optional[int] = None, sites: List[int] = None,
+            cache_local: bool = False,
+            bangumiid: Optional[int] = None, anilistid: Optional[int] = None,
+            source: Optional[str] = None, mediaid: Optional[str] = None,
+    ) -> List[Context]:
         """
-        根据TMDBID/豆瓣ID搜索资源，精确匹配，不过滤本地存在的资源
+        根据数据源媒体 ID 搜索资源，精确匹配，不过滤本地存在的资源
         :param tmdbid: TMDB ID
         :param doubanid: 豆瓣 ID
+        :param bangumiid: Bangumi ID
+        :param anilistid: AniList ID
+        :param source: 媒体数据源
+        :param mediaid: 数据源原生 ID
         :param mtype: 媒体，电影 or 电视剧
         :param area: 搜索范围，title or imdbid
         :param season: 季数
@@ -510,20 +542,26 @@ class SearchChain(ChainBase):
         if cache_local:
             self.cancel_ai_recommend()
             self.save_last_search_params(
-                keyword=self._build_search_keyword(tmdbid=tmdbid, doubanid=doubanid),
+                keyword=self._build_search_keyword(
+                    source, mediaid, tmdbid, doubanid, bangumiid, anilistid
+                ),
                 mtype=mtype,
                 area=area,
                 season=season,
                 sites=sites,
             )
-        mediainfo = self.recognize_media(tmdbid=tmdbid, doubanid=doubanid, mtype=mtype)
+        mediainfo = self.recognize_media(
+            source=source, mediaid=mediaid, tmdbid=tmdbid, doubanid=doubanid,
+            bangumiid=bangumiid, anilistid=anilistid, mtype=mtype,
+        )
         if not mediainfo:
-            logger.error(f'{tmdbid} 媒体信息识别失败！')
+            logger.error(f'{self._build_search_keyword(source, mediaid, tmdbid, doubanid, bangumiid, anilistid)} 媒体信息识别失败！')
             return []
         no_exists = None
         if season is not None:
+            media_source, media_id = resolve_media_identity(media=mediainfo)
             no_exists = {
-                tmdbid or doubanid: {
+                build_media_key(media_source, media_id): {
                     season: NotExistMediaInfo(episodes=[])
                 }
             }
@@ -664,14 +702,22 @@ class SearchChain(ChainBase):
             "total_items": len(subtitles)
         }
 
-    async def async_search_subtitles_by_id(self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
-                                           mtype: MediaType = None, season: Optional[int] = None,
-                                           episode: Optional[int] = None, sites: List[int] = None,
-                                           cache_local: bool = False) -> List[SubtitleInfo]:
+    async def async_search_subtitles_by_id(
+            self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
+            mtype: MediaType = None, season: Optional[int] = None,
+            episode: Optional[int] = None, sites: List[int] = None,
+            cache_local: bool = False,
+            bangumiid: Optional[int] = None, anilistid: Optional[int] = None,
+            source: Optional[str] = None, mediaid: Optional[str] = None,
+    ) -> List[SubtitleInfo]:
         """
-        根据TMDBID/豆瓣ID异步精确搜索字幕，不应用过滤规则。
+        根据数据源媒体 ID 异步精确搜索字幕，不应用过滤规则。
         :param tmdbid: TMDB ID
         :param doubanid: 豆瓣 ID
+        :param bangumiid: Bangumi ID
+        :param anilistid: AniList ID
+        :param source: 媒体数据源
+        :param mediaid: 数据源原生 ID
         :param mtype: 媒体，电影 or 电视剧
         :param season: 季数
         :param episode: 集数
@@ -681,7 +727,9 @@ class SearchChain(ChainBase):
         if cache_local:
             self.cancel_ai_recommend()
             await self.async_save_last_search_params(
-                keyword=self._build_search_keyword(tmdbid=tmdbid, doubanid=doubanid),
+                keyword=self._build_search_keyword(
+                    source, mediaid, tmdbid, doubanid, bangumiid, anilistid
+                ),
                 mtype=mtype,
                 area="title",
                 season=season,
@@ -689,14 +737,24 @@ class SearchChain(ChainBase):
                 sites=sites,
                 result_type="subtitle",
             )
-        mediainfo = await self.async_recognize_media(tmdbid=tmdbid, doubanid=doubanid, mtype=mtype)
+        mediainfo = await self.async_recognize_media(
+            source=source, mediaid=mediaid, tmdbid=tmdbid, doubanid=doubanid,
+            bangumiid=bangumiid, anilistid=anilistid, mtype=mtype,
+        )
         if not mediainfo:
-            logger.error(f'{tmdbid} 媒体信息识别失败！')
+            logger.error(
+                f'{self._build_search_keyword(source, mediaid, tmdbid, doubanid, bangumiid, anilistid)} '
+                '媒体信息识别失败！'
+            )
             return []
         subtitles = await self.__async_search_subtitles_for_media(
             mediainfo=mediainfo,
             tmdbid=tmdbid,
             doubanid=doubanid,
+            bangumiid=bangumiid,
+            anilistid=anilistid,
+            source=source,
+            mediaid=mediaid,
             season=season,
             episode=episode,
             sites=sites,
@@ -714,14 +772,20 @@ class SearchChain(ChainBase):
             episode: Optional[int] = None,
             sites: List[int] = None,
             cache_local: bool = False,
+            bangumiid: Optional[int] = None,
+            anilistid: Optional[int] = None,
+            source: Optional[str] = None,
+            mediaid: Optional[str] = None,
     ) -> AsyncIterator[dict]:
         """
-        根据TMDBID/豆瓣ID渐进式精确搜索字幕，先返回站点候选，再返回标题和剧集匹配后的结果。
+        根据数据源媒体 ID 渐进式精确搜索字幕，先返回站点候选，再返回标题和剧集匹配后的结果。
         """
         if cache_local:
             self.cancel_ai_recommend()
             await self.async_save_last_search_params(
-                keyword=self._build_search_keyword(tmdbid=tmdbid, doubanid=doubanid),
+                keyword=self._build_search_keyword(
+                    source, mediaid, tmdbid, doubanid, bangumiid, anilistid
+                ),
                 mtype=mtype,
                 area="title",
                 season=season,
@@ -729,9 +793,15 @@ class SearchChain(ChainBase):
                 sites=sites,
                 result_type="subtitle",
             )
-        mediainfo = await self.async_recognize_media(tmdbid=tmdbid, doubanid=doubanid, mtype=mtype)
+        mediainfo = await self.async_recognize_media(
+            source=source, mediaid=mediaid, tmdbid=tmdbid, doubanid=doubanid,
+            bangumiid=bangumiid, anilistid=anilistid, mtype=mtype,
+        )
         if not mediainfo:
-            logger.error(f'{tmdbid} 媒体信息识别失败！')
+            logger.error(
+                f'{self._build_search_keyword(source, mediaid, tmdbid, doubanid, bangumiid, anilistid)} '
+                '媒体信息识别失败！'
+            )
             yield {
                 "type": "error",
                 "success": False,
@@ -744,6 +814,10 @@ class SearchChain(ChainBase):
                 mediainfo=mediainfo,
                 tmdbid=tmdbid,
                 doubanid=doubanid,
+                bangumiid=bangumiid,
+                anilistid=anilistid,
+                source=source,
+                mediaid=mediaid,
                 season=season,
                 episode=episode,
                 sites=sites):
@@ -759,13 +833,22 @@ class SearchChain(ChainBase):
         if cache_local:
             await self.async_save_cache(subtitles, self.__subtitle_result_temp_file)
 
-    async def async_search_by_id(self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
-                                 mtype: MediaType = None, area: Optional[str] = "title", season: Optional[int] = None,
-                                 sites: List[int] = None, cache_local: bool = False) -> List[Context]:
+    async def async_search_by_id(
+            self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
+            mtype: MediaType = None, area: Optional[str] = "title",
+            season: Optional[int] = None, sites: List[int] = None,
+            cache_local: bool = False,
+            bangumiid: Optional[int] = None, anilistid: Optional[int] = None,
+            source: Optional[str] = None, mediaid: Optional[str] = None,
+    ) -> List[Context]:
         """
-        根据TMDBID/豆瓣ID异步搜索资源，精确匹配，不过滤本地存在的资源
+        根据数据源媒体 ID 异步搜索资源，精确匹配，不过滤本地存在的资源
         :param tmdbid: TMDB ID
         :param doubanid: 豆瓣 ID
+        :param bangumiid: Bangumi ID
+        :param anilistid: AniList ID
+        :param source: 媒体数据源
+        :param mediaid: 数据源原生 ID
         :param mtype: 媒体，电影 or 电视剧
         :param area: 搜索范围，title or imdbid
         :param season: 季数
@@ -775,20 +858,29 @@ class SearchChain(ChainBase):
         if cache_local:
             self.cancel_ai_recommend()
             await self.async_save_last_search_params(
-                keyword=self._build_search_keyword(tmdbid=tmdbid, doubanid=doubanid),
+                keyword=self._build_search_keyword(
+                    source, mediaid, tmdbid, doubanid, bangumiid, anilistid
+                ),
                 mtype=mtype,
                 area=area,
                 season=season,
                 sites=sites,
             )
-        mediainfo = await self.async_recognize_media(tmdbid=tmdbid, doubanid=doubanid, mtype=mtype)
+        mediainfo = await self.async_recognize_media(
+            source=source, mediaid=mediaid, tmdbid=tmdbid, doubanid=doubanid,
+            bangumiid=bangumiid, anilistid=anilistid, mtype=mtype,
+        )
         if not mediainfo:
-            logger.error(f'{tmdbid} 媒体信息识别失败！')
+            logger.error(
+                f'{self._build_search_keyword(source, mediaid, tmdbid, doubanid, bangumiid, anilistid)} '
+                '媒体信息识别失败！'
+            )
             return []
         no_exists = None
         if season is not None:
+            media_source, media_id = resolve_media_identity(media=mediainfo)
             no_exists = {
-                tmdbid or doubanid: {
+                build_media_key(media_source, media_id): {
                     season: NotExistMediaInfo(episodes=[])
                 }
             }
@@ -919,25 +1011,37 @@ class SearchChain(ChainBase):
         logger.info(f'标题搜索过滤完成，剩余 {len(filtered_torrents)} 个资源')
         return filtered_torrents
 
-    async def async_search_by_id_stream(self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
-                                        mtype: MediaType = None, area: Optional[str] = "title",
-                                        season: Optional[int] = None, sites: List[int] = None,
-                                        cache_local: bool = False) -> AsyncIterator[dict]:
+    async def async_search_by_id_stream(
+            self, tmdbid: Optional[int] = None, doubanid: Optional[str] = None,
+            mtype: MediaType = None, area: Optional[str] = "title",
+            season: Optional[int] = None, sites: List[int] = None,
+            cache_local: bool = False,
+            bangumiid: Optional[int] = None, anilistid: Optional[int] = None,
+            source: Optional[str] = None, mediaid: Optional[str] = None,
+    ) -> AsyncIterator[dict]:
         """
-        根据TMDBID/豆瓣ID渐进式搜索资源，先返回站点原始候选，再返回过滤匹配后的最终结果
+        根据数据源媒体 ID 渐进式搜索资源，先返回站点原始候选，再返回过滤匹配后的最终结果
         """
         if cache_local:
             self.cancel_ai_recommend()
             await self.async_save_last_search_params(
-                keyword=self._build_search_keyword(tmdbid=tmdbid, doubanid=doubanid),
+                keyword=self._build_search_keyword(
+                    source, mediaid, tmdbid, doubanid, bangumiid, anilistid
+                ),
                 mtype=mtype,
                 area=area,
                 season=season,
                 sites=sites,
             )
-        mediainfo = await self.async_recognize_media(tmdbid=tmdbid, doubanid=doubanid, mtype=mtype)
+        mediainfo = await self.async_recognize_media(
+            source=source, mediaid=mediaid, tmdbid=tmdbid, doubanid=doubanid,
+            bangumiid=bangumiid, anilistid=anilistid, mtype=mtype,
+        )
         if not mediainfo:
-            logger.error(f'{tmdbid} 媒体信息识别失败！')
+            logger.error(
+                f'{self._build_search_keyword(source, mediaid, tmdbid, doubanid, bangumiid, anilistid)} '
+                '媒体信息识别失败！'
+            )
             yield {
                 "type": "error",
                 "success": False,
@@ -947,8 +1051,9 @@ class SearchChain(ChainBase):
 
         no_exists = None
         if season is not None:
+            media_source, media_id = resolve_media_identity(media=mediainfo)
             no_exists = {
-                tmdbid or doubanid: {
+                build_media_key(media_source, media_id): {
                     season: NotExistMediaInfo(episodes=[])
                 }
             }
@@ -976,7 +1081,8 @@ class SearchChain(ChainBase):
         准备搜索参数
         """
         # 缺失的季集
-        mediakey = mediainfo.tmdb_id or mediainfo.douban_id
+        media_source, media_id = resolve_media_identity(media=mediainfo)
+        mediakey = build_media_key(media_source, media_id)
         if no_exists and no_exists.get(mediakey):
             # 过滤剧集
             season_episodes = {sea: info.episodes
@@ -1236,9 +1342,10 @@ class SearchChain(ChainBase):
 
         # 补充媒体信息
         if not mediainfo.names:
-            mediainfo: MediaInfo = self.recognize_media(mtype=mediainfo.type,
-                                                        tmdbid=mediainfo.tmdb_id,
-                                                        doubanid=mediainfo.douban_id)
+            mediainfo: MediaInfo = self.recognize_media(
+                mtype=mediainfo.type,
+                **self._media_recognize_kwargs(mediainfo),
+            )
             if not mediainfo:
                 logger.error(f'媒体信息识别失败！')
                 return []
@@ -1320,9 +1427,10 @@ class SearchChain(ChainBase):
 
         # 补充媒体信息
         if not mediainfo.names:
-            mediainfo: MediaInfo = await self.async_recognize_media(mtype=mediainfo.type,
-                                                                    tmdbid=mediainfo.tmdb_id,
-                                                                    doubanid=mediainfo.douban_id)
+            mediainfo: MediaInfo = await self.async_recognize_media(
+                mtype=mediainfo.type,
+                **self._media_recognize_kwargs(mediainfo),
+            )
             if not mediainfo:
                 logger.error(f'媒体信息识别失败！')
                 return []
@@ -1393,9 +1501,10 @@ class SearchChain(ChainBase):
 
         # 补充媒体信息
         if not mediainfo.names:
-            mediainfo = await self.async_recognize_media(mtype=mediainfo.type,
-                                                         tmdbid=mediainfo.tmdb_id,
-                                                         doubanid=mediainfo.douban_id)
+            mediainfo = await self.async_recognize_media(
+                mtype=mediainfo.type,
+                **self._media_recognize_kwargs(mediainfo),
+            )
             if not mediainfo:
                 logger.error(f'媒体信息识别失败！')
                 yield {
@@ -1629,6 +1738,10 @@ class SearchChain(ChainBase):
                                                  mediainfo: MediaInfo,
                                                  tmdbid: Optional[int] = None,
                                                  doubanid: Optional[str] = None,
+                                                 bangumiid: Optional[int] = None,
+                                                 anilistid: Optional[int] = None,
+                                                 source: Optional[str] = None,
+                                                 mediaid: Optional[str] = None,
                                                  season: Optional[int] = None,
                                                  episode: Optional[int] = None,
                                                  sites: List[int] = None,
@@ -1643,17 +1756,23 @@ class SearchChain(ChainBase):
         logger.info(f'开始精确搜索字幕，关键词：{mediainfo.title} ...')
 
         if not mediainfo.names:
-            mediainfo = await self.async_recognize_media(mtype=mediainfo.type,
-                                                         tmdbid=mediainfo.tmdb_id,
-                                                         doubanid=mediainfo.douban_id)
+            mediainfo = await self.async_recognize_media(
+                mtype=mediainfo.type,
+                **self._media_recognize_kwargs(mediainfo),
+            )
             if not mediainfo:
                 logger.error('媒体信息识别失败！')
                 return []
 
         no_exists = None
         if season is not None:
+            media_source, media_id = resolve_media_identity(
+                media=mediainfo, source=source, media_id=mediaid,
+                tmdbid=tmdbid, doubanid=doubanid,
+                bangumiid=bangumiid, anilistid=anilistid,
+            )
             no_exists = {
-                tmdbid or doubanid: {
+                build_media_key(media_source, media_id): {
                     season: NotExistMediaInfo(episodes=[episode] if episode is not None else [])
                 }
             }
@@ -1699,6 +1818,10 @@ class SearchChain(ChainBase):
             mediainfo: MediaInfo,
             tmdbid: Optional[int] = None,
             doubanid: Optional[str] = None,
+            bangumiid: Optional[int] = None,
+            anilistid: Optional[int] = None,
+            source: Optional[str] = None,
+            mediaid: Optional[str] = None,
             season: Optional[int] = None,
             episode: Optional[int] = None,
             sites: List[int] = None,
@@ -1714,9 +1837,10 @@ class SearchChain(ChainBase):
         logger.info(f'开始渐进式精确搜索字幕，关键词：{mediainfo.title} ...')
 
         if not mediainfo.names:
-            mediainfo = await self.async_recognize_media(mtype=mediainfo.type,
-                                                         tmdbid=mediainfo.tmdb_id,
-                                                         doubanid=mediainfo.douban_id)
+            mediainfo = await self.async_recognize_media(
+                mtype=mediainfo.type,
+                **self._media_recognize_kwargs(mediainfo),
+            )
             if not mediainfo:
                 logger.error('媒体信息识别失败！')
                 yield {
@@ -1728,8 +1852,13 @@ class SearchChain(ChainBase):
 
         no_exists = None
         if season is not None:
+            media_source, media_id = resolve_media_identity(
+                media=mediainfo, source=source, media_id=mediaid,
+                tmdbid=tmdbid, doubanid=doubanid,
+                bangumiid=bangumiid, anilistid=anilistid,
+            )
             no_exists = {
-                tmdbid or doubanid: {
+                build_media_key(media_source, media_id): {
                     season: NotExistMediaInfo(episodes=[episode] if episode is not None else [])
                 }
             }
