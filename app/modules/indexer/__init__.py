@@ -16,6 +16,7 @@ from app.modules.indexer.spider.haidan import HaiDanSpider
 from app.modules.indexer.spider.hddolby import HddolbySpider
 from app.modules.indexer.spider.mtorrent import MTorrentSpider
 from app.modules.indexer.spider.rousi import RousiSpider
+from app.modules.indexer.spider.sunnypt import SunnyPTSpider
 from app.modules.indexer.spider.tnode import TNodeSpider
 from app.modules.indexer.spider.torrentleech import TorrentLeech
 from app.modules.indexer.spider.yema import YemaSpider
@@ -31,6 +32,7 @@ SPIDER_PARSER_CLASSES = {
     "Haidan": HaiDanSpider,
     "HDDolby": HddolbySpider,
     "RousiPro": RousiSpider,
+    "SunnyPT": SunnyPTSpider,
 }
 
 
@@ -42,6 +44,7 @@ class IndexerModule(_ModuleBase):
     _site_schemas = []
 
     def init_module(self) -> None:
+        """加载站点用户数据解析器"""
         # 加载模块
         self._site_schemas = ModuleHelper.load(
             'app.modules.indexer.parser',
@@ -50,6 +53,7 @@ class IndexerModule(_ModuleBase):
 
     @staticmethod
     def get_name() -> str:
+        """获取模块名称"""
         return "站点索引"
 
     @staticmethod
@@ -74,6 +78,7 @@ class IndexerModule(_ModuleBase):
         return 0
 
     def stop(self):
+        """停止索引模块"""
         pass
 
     def test(self) -> Tuple[bool, str]:
@@ -86,6 +91,7 @@ class IndexerModule(_ModuleBase):
         return True, ""
 
     def init_setting(self) -> Tuple[str, Union[str, bool]]:
+        """索引模块无需独立开关配置"""
         pass
 
     @staticmethod
@@ -243,6 +249,13 @@ class IndexerModule(_ModuleBase):
                     mtype=mtype,
                     page=page
                 )
+            elif site.get('parser') == "SunnyPT":
+                error_flag, result = SunnyPTSpider(site).search(
+                    keyword=search_word,
+                    mtype=mtype,
+                    cat=cat,
+                    page=page
+                )
             elif site.get('parser') == "Yema":
                 error_flag, result = YemaSpider(site).search(
                     keyword=search_word,
@@ -377,6 +390,13 @@ class IndexerModule(_ModuleBase):
                 error_flag, result = await MTorrentSpider(site).async_search(
                     keyword=search_word,
                     mtype=mtype,
+                    page=page
+                )
+            elif site.get('parser') == "SunnyPT":
+                error_flag, result = await SunnyPTSpider(site).async_search(
+                    keyword=search_word,
+                    mtype=mtype,
+                    cat=cat,
                     page=page
                 )
             elif site.get('parser') == "Yema":
@@ -1048,7 +1068,8 @@ class IndexerModule(_ModuleBase):
                         apikey=site.get("apikey"),
                         token=site.get("token"),
                         ua=site.get("ua"),
-                        proxy=site.get("proxy"))
+                        proxy=site.get("proxy"),
+                        api_url=site.get("api_url"))
             return None
 
         site_obj = __get_site_obj()
