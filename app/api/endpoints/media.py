@@ -36,7 +36,7 @@ def _build_media_seasons(
             episode_count=item.get("episode_count"),
             name=item.get("name"),
             overview=item.get("overview"),
-            poster_path=item.get("poster_path"),
+            poster_path=item.get("poster_path") or mediainfo.poster_path,
             season_number=season_number,
             vote_average=item.get("vote_average"),
         ))
@@ -366,6 +366,9 @@ async def seasons(
             )
             if mediainfo:
                 return _build_media_seasons(mediainfo, season)
+        # 明确来源的查询不能按标题切换到默认识别源，避免辅助 TMDB 信息替换主身份。
+        if media_source and source_media_id:
+            return []
     if title:
         meta = MetaInfo(title)
         if year:

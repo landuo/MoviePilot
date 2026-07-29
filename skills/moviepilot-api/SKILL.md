@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 4
+version: 6
 description: >-
   Use this skill when you need to call MoviePilot REST API endpoints directly
   with the bundled Python client. Covers MoviePilot HTTP endpoints across media
@@ -169,6 +169,8 @@ AniList endpoints prefer the `anilist-chinese` proxy and fall back to official A
 | GET | `/api/v1/search/last/context` | Get latest search results with replayable params. `params.result_type` is `torrent` or `subtitle` |
 | POST | `/api/v1/search/recommend` | AI recommended resources. Body: `filtered_indices`, `check_only`, `force` |
 
+Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business events; use it only to keep the connection alive. Final `replace` payloads above 48 items are batched: the first event uses `type=replace`, later events use `type=append`, and every batch includes `replace_batch=true`, zero-based `batch_index`, `batch_count`, and final `total_items`. Collect all batches in order and replace the visible result atomically. After a `replace`, the final `done` event omits duplicate `items`.
+
 ### Download (8 endpoints)
 
 | Method | Path | Description |
@@ -286,7 +288,7 @@ AniList endpoints prefer the `anilist-chinese` proxy and fall back to official A
 | POST | `/api/v1/storage/save/{name}` | Save storage config. Body: JSON object |
 | GET | `/api/v1/storage/reset/{name}` | Reset storage config |
 
-### Transfer (6 endpoints)
+### Transfer (7 endpoints)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -294,7 +296,8 @@ AniList endpoints prefer the `anilist-chinese` proxy and fall back to official A
 | GET | `/api/v1/transfer/queue` | Transfer queue |
 | DELETE | `/api/v1/transfer/queue` | Remove from transfer queue. Body: FileItem JSON |
 | POST | `/api/v1/transfer/manual/target-path` | Match manual transfer target path. Body: ManualTransferItem JSON; optional `media_source` + `media_id` select the recognition source |
-| POST | `/api/v1/transfer/manual` | Manual transfer. Params: `background`. Body: ManualTransferItem JSON; optional `media_source` + `media_id` select recognition and scraping source |
+| POST | `/api/v1/transfer/manual/history` | Query successful transfer-history summary for selected files or directories. Body: ManualTransferItem JSON |
+| POST | `/api/v1/transfer/manual` | Manual transfer. Params: `background`. Body: ManualTransferItem JSON; optional `media_source` + `media_id` select recognition and scraping source; matching failed history is cleared automatically, while `reorganize=true` removes matched successful history and old non-move targets before retrying |
 | GET | `/api/v1/transfer/now` | Run immediate transfer |
 
 ### Dashboard (19 endpoints)

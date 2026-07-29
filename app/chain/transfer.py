@@ -55,7 +55,7 @@ from app.schemas.types import (
     ContentType,
 )
 from app.utils.mixins import ConfigReloadMixin
-from app.utils.media import parse_media_key
+from app.utils.media import normalize_media_source, parse_media_key, resolve_media_identity
 from app.utils.singleton import Singleton
 from app.utils.string import StringUtils
 from app.utils.system import SystemUtils
@@ -142,19 +142,8 @@ class JobManager:
         """
         if not media:
             return None, season
-        media_ids = {
-            "themoviedb": media.tmdb_id,
-            "douban": media.douban_id,
-            "bangumi": media.bangumi_id,
-            "anilist": media.anilist_id,
-        }
-        source = media.source
-        if not source or media_ids.get(source) is None:
-            source = next(
-                (name for name, media_id in media_ids.items() if media_id is not None),
-                source,
-            )
-        return (source, media_ids.get(source)), season
+        source, media_id = resolve_media_identity(media=media)
+        return (source, media_id), season
 
     @staticmethod
     def __get_file_key(fileitem: FileItem) -> Optional[Tuple[str, str]]:
@@ -793,6 +782,23 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
     CONFIG_WATCH = {
         "TRANSFER_THREADS",
     }
+
+    @staticmethod
+    def _requires_automatic_category(task: TransferTask) -> bool:
+        """
+        判断当前整理任务是否需要根据媒体识别结果自动创建类别目录。
+
+        :param task: 整理任务
+        :return: 是否必须具备自动分类结果
+        """
+        target_directory = task.target_directory
+        if target_directory and target_directory.media_category:
+            return False
+        if task.library_category_folder is not None:
+            return bool(task.library_category_folder)
+        return bool(
+            target_directory and target_directory.library_category_folder
+        )
 
     def __init__(self):
         """初始化文件整理处理链。"""
@@ -1709,8 +1715,15 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
 
                 mediainfo_changed = True
 
-            # 如果未开启新增已入库媒体是否跟随TMDB信息变化则根据tmdbid查询之前的title
-            if not settings.SCRAP_FOLLOW_TMDB:
+            # TMDB 仅作为辅助信息合并，不能改变原识别源的主身份和标题。
+            mediainfo = MediaChain().supplement_tmdb_info(mediainfo, task.meta)
+            task.mediainfo = mediainfo
+
+            # 只有 TMDB 主源沿用历史 TMDB 标题，避免辅助 ID 改写其它识别源标题。
+            if (
+                    not settings.SCRAP_FOLLOW_TMDB
+                    and normalize_media_source(mediainfo.source) == "themoviedb"
+            ):
                 transfer_history = transferhis.get_by_type_tmdbid(
                     tmdbid=mediainfo.tmdb_id, mtype=mediainfo.type.value
                 )
@@ -1727,7 +1740,11 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     return False, f"{task.fileitem.name} 已在整理队列中"
 
             # 获取集数据
-            if task.mediainfo.type == MediaType.TV and not task.episodes_info:
+            if (
+                    task.mediainfo.type == MediaType.TV
+                    and task.mediainfo.tmdb_id
+                    and not task.episodes_info
+            ):
                 # 判断注意season为0的情况
                 season_num = task.mediainfo.season
                 if season_num is None and task.meta.season_seq:
@@ -1761,6 +1778,24 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     )
             if not task.target_storage and task.target_directory:
                 task.target_storage = task.target_directory.library_storage
+
+            if self._requires_automatic_category(task) and not task.mediainfo.category:
+                if task.mediainfo.tmdb_id:
+                    error_message = "TMDB 信息未匹配到媒体分类，无法按媒体类别整理"
+                else:
+                    error_message = "未识别到 TMDB 辅助信息，无法按媒体类别整理"
+                logger.error(f"{task.fileitem.name} {error_message}")
+                if callback:
+                    return callback(
+                        task,
+                        TransferInfo(
+                            success=False,
+                            fileitem=task.fileitem,
+                            transfer_type=task.transfer_type,
+                            message=error_message,
+                        ),
+                    )
+                return False, error_message
 
             # 正在处理
             self.jobview.running_task(task)
@@ -2601,6 +2636,97 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             else None
         )
 
+    @staticmethod
+    def _is_successful_move_history(history: Optional[TransferHistory]) -> bool:
+        """判断历史记录是否为已成功完成的移动类整理。"""
+        return bool(
+            history
+            and history.status
+            and history.mode
+            and "move" in history.mode
+        )
+
+    def _get_manual_transfer_history(
+            self,
+            fileitem: FileItem,
+            transfer_history_oper: TransferHistoryOper,
+            include_move_dest: bool = False,
+    ) -> Optional[TransferHistory]:
+        """查询文件源路径历史，并兼容从成功移动后的目标现址重新整理。"""
+        history = transfer_history_oper.get_by_src(
+            fileitem.path,
+            storage=fileitem.storage,
+        )
+        if history or not include_move_dest:
+            return history
+
+        history = transfer_history_oper.get_by_dest(
+            fileitem.path,
+            storage=fileitem.storage,
+        )
+        return history if self._is_successful_move_history(history) else None
+
+    def get_manual_transfer_histories(
+            self,
+            fileitems: List[FileItem],
+    ) -> List[TransferHistory]:
+        """
+        查询文件或目录命中的成功整理记录，供手动整理界面显示重整状态。
+
+        :param fileitems: 待查询的文件或目录项
+        :return: 去重后的成功整理记录
+        """
+        transfer_history_oper = TransferHistoryOper()
+        histories: Dict[int, TransferHistory] = {}
+        for fileitem in fileitems or []:
+            if not fileitem or not fileitem.path:
+                continue
+            storage = fileitem.storage or "local"
+            if fileitem.type == "dir":
+                matched_histories = transfer_history_oper.list_success_by_src(
+                    fileitem.path,
+                    storage=storage,
+                    recursive=True,
+                )
+                matched_histories.extend(
+                    transfer_history_oper.list_success_move_by_dest(
+                        fileitem.path,
+                        storage=storage,
+                        recursive=True,
+                    )
+                )
+            else:
+                history = self._get_manual_transfer_history(
+                    fileitem=fileitem,
+                    transfer_history_oper=transfer_history_oper,
+                    include_move_dest=True,
+                )
+                matched_histories = [history] if history and history.status else []
+
+            for history in matched_histories:
+                histories[history.id] = history
+        return list(histories.values())
+
+    @staticmethod
+    def _delete_manual_transfer_history(
+            history: TransferHistory,
+            transfer_history_oper: TransferHistoryOper,
+    ) -> Tuple[bool, str]:
+        """删除手动重整历史；非成功移动记录同时清理可能存在的旧目标。"""
+        if (
+                history.dest_fileitem
+                and not TransferChain._is_successful_move_history(history)
+        ):
+            dest_fileitem = FileItem(**history.dest_fileitem)
+            storage_chain = StorageChain()
+            if (
+                    storage_chain.exists(dest_fileitem)
+                    and not storage_chain.delete_media_file(dest_fileitem)
+            ):
+                return False, f"{dest_fileitem.path} 删除失败"
+        transfer_history_oper.delete(history.id)
+        return True, ""
+
     def do_transfer(
             self,
             fileitem: FileItem,
@@ -2626,6 +2752,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             sync_extra_files: Optional[bool] = False,
             cleanup_dest_fileitem: Optional[FileItem] = None,
             continue_callback: Callable = None,
+            reorganize: Optional[bool] = False,
     ) -> Tuple[bool, Union[str, dict]]:
         """
         执行一个复杂目录的整理操作
@@ -2649,6 +2776,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         :param background: 是否后台运行
         :param manual: 是否手动整理
         :param preview: 是否仅预览
+        :param reorganize: 是否清理已有成功记录后重新整理
         :param sync_extra_files: 是否在整理主视频文件时同步整理同媒体附加文件
         :param cleanup_dest_fileitem: 确认存在待整理任务后需要清理的旧目标文件
         :param continue_callback: 继续处理回调
@@ -3079,11 +3207,33 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     raise OperationInterrupted()
                 file_path = Path(file_item.path)
 
-                # 整理成功的不再处理
-                if not force and not preview:
-                    transferd = TransferHistoryOper().get_by_src(
-                        file_item.path, storage=file_item.storage
+                # 自动整理继续按全部历史去重；手动整理可清理失败记录，或按用户确认清理成功记录。
+                if (not force or reorganize) and not preview:
+                    transfer_history_oper = TransferHistoryOper()
+                    transferd = self._get_manual_transfer_history(
+                        fileitem=file_item,
+                        transfer_history_oper=transfer_history_oper,
+                        include_move_dest=manual and reorganize,
                     )
+                    if transferd:
+                        should_reorganize = manual and (
+                            reorganize or not transferd.status
+                        )
+                        if should_reorganize:
+                            state, message = self._delete_manual_transfer_history(
+                                history=transferd,
+                                transfer_history_oper=transfer_history_oper,
+                            )
+                            if not state:
+                                all_success = False
+                                logger.error(message)
+                                err_msgs.append(message)
+                                continue
+                            logger.info(
+                                f"{file_item.path} 已清理旧整理记录，继续重新整理。"
+                            )
+                            transferd = None
+
                     if transferd:
                         skipped_history_count += 1
                         if not transferd.status:
@@ -3540,6 +3690,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
             cleanup_dest_fileitem: Optional[FileItem] = None,
             bangumiid: Optional[int] = None,
             anilistid: Optional[int] = None,
+            reorganize: Optional[bool] = False,
     ) -> Tuple[bool, Union[str, dict]]:
         """
         手动整理，支持复杂条件，带进度显示
@@ -3566,6 +3717,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         :param downloader: 下载器名称
         :param download_hash: 下载任务哈希
         :param preview: 是否仅预览
+        :param reorganize: 是否清理已有成功记录后重新整理
         :param sync_extra_files: 是否同步整理同媒体附加文件
         :param cleanup_dest_fileitem: 确认存在待整理任务后需要清理的旧目标文件
         """
@@ -3616,6 +3768,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                 downloader=downloader,
                 download_hash=download_hash,
                 preview=preview,
+                reorganize=reorganize,
                 sync_extra_files=sync_extra_files,
                 cleanup_dest_fileitem=cleanup_dest_fileitem,
             )
@@ -3644,6 +3797,7 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                 downloader=downloader,
                 download_hash=download_hash,
                 preview=preview,
+                reorganize=reorganize,
                 sync_extra_files=sync_extra_files,
                 cleanup_dest_fileitem=cleanup_dest_fileitem,
             )
