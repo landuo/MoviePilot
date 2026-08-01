@@ -1293,6 +1293,7 @@ class SubscribeChain(ChainBase):
                 media_source=media_source,
                 media_id=media_id,
                 season=meta.begin_season if meta else None,
+                episode_group=mediainfo.episode_group,
         ):
             return True
         return False
@@ -2282,7 +2283,8 @@ class SubscribeChain(ChainBase):
                                         anilistid=share_sub.get("anilistid"),
                                         media_source=share_sub.get("media_source"),
                                         media_id=share_sub.get("media_id"),
-                                        season=share_sub.get("season")):
+                                        season=share_sub.get("season"),
+                                        episode_group=share_sub.get("episode_group")):
                     continue
                 # 已经订阅过跳过
                 if subscribeoper.exist_history(tmdbid=share_sub.get("tmdbid"),
@@ -2291,7 +2293,8 @@ class SubscribeChain(ChainBase):
                                                anilistid=share_sub.get("anilistid"),
                                                media_source=share_sub.get("media_source"),
                                                media_id=share_sub.get("media_id"),
-                                               season=share_sub.get("season")):
+                                               season=share_sub.get("season"),
+                                               episode_group=share_sub.get("episode_group")):
                     continue
                 # 去除无效属性
                 for key in list(share_sub.keys()):
@@ -2322,6 +2325,7 @@ class SubscribeChain(ChainBase):
                                                     year=subscribe_in.year,
                                                     tmdbid=subscribe_in.tmdbid,
                                                     season=subscribe_in.season,
+                                                    episode_group=subscribe_in.episode_group,
                                                     doubanid=subscribe_in.doubanid,
                                                     bangumiid=subscribe_in.bangumiid,
                                                     anilistid=subscribe_in.anilistid,

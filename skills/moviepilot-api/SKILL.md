@@ -324,13 +324,16 @@ Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business 
 | GET | `/api/v1/dashboard/network` | Network traffic |
 | GET | `/api/v1/dashboard/network2` | Network traffic (API_TOKEN) |
 
-### Plugin (22 endpoints)
+### Plugin (25 endpoints)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/plugin/` | List plugins. Params: `state` (installed/market/all), `force` |
 | GET | `/api/v1/plugin/installed` | List installed plugins |
 | GET | `/api/v1/plugin/statistic` | Plugin install statistics |
+| GET | `/api/v1/plugin/rating` | Batch plugin ratings. Params: comma-separated `plugin_ids` |
+| GET | `/api/v1/plugin/rating/{plugin_id}` | Get average rating, rating count, and this installation's rating |
+| POST | `/api/v1/plugin/rating/{plugin_id}` | Rate an installed plugin. Body: `{"rating": 4.5}`; range 0.1-5.0 |
 | GET | `/api/v1/plugin/install/{plugin_id}` | Install plugin. Params: `repo_url`, `force` |
 | GET | `/api/v1/plugin/reload/{plugin_id}` | Reload plugin |
 | GET | `/api/v1/plugin/reset/{plugin_id}` | Reset plugin config & data |
@@ -441,6 +444,20 @@ Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business 
 | POST | `/api/v1/torrent/cache/refresh` | Refresh torrent cache |
 | POST | `/api/v1/torrent/cache/reidentify/{domain}/{torrent_hash}` | Re-identify torrent. Params: `tmdbid`, `doubanid` |
 
+### Recognition Cache (6 endpoints)
+
+The two list endpoints return local cache totals plus `shared_recognized` and
+`shared_recognize_enabled` for the persisted successful shared-recognition count.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/tmdb/cache` | Get TheMovieDb recognition cache statistics |
+| DELETE | `/api/v1/tmdb/cache/{cache_key}` | Delete one URL-encoded TheMovieDb recognition cache key |
+| DELETE | `/api/v1/tmdb/cache` | Clear TheMovieDb recognition cache |
+| GET | `/api/v1/douban/cache` | Get Douban recognition cache statistics |
+| DELETE | `/api/v1/douban/cache/{cache_key}` | Delete one URL-encoded Douban recognition cache key |
+| DELETE | `/api/v1/douban/cache` | Clear Douban recognition cache |
+
 ### Message (8 endpoints)
 
 | Method | Path | Description |
@@ -487,6 +504,11 @@ Streaming search sends `{"type":"heartbeat"}` every 15 seconds without business 
 | POST | `/api/v1/mcp/tools/call` | Call a tool. Body: `{"tool_name":"...","arguments":{...}}` |
 | GET | `/api/v1/mcp/tools/{tool_name}` | Get tool definition |
 | GET | `/api/v1/mcp/tools/{tool_name}/schema` | Get tool input schema |
+
+The exposed tool list is dynamic: it includes tools declared by enabled plugins
+and is refreshed lazily after plugin startup, shutdown, reload, or configuration
+activation. Clients that cache MCP metadata must request `tools/list` again or
+reconnect after a plugin lifecycle change.
 
 ### Agent MCP Client (3 endpoints)
 
