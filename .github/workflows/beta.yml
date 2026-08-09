@@ -21,6 +21,25 @@ jobs:
           app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp")
           echo "app_version=$app_version" >> $GITHUB_ENV
 
+      - name: Checkout Wiki Plugin Market
+        uses: actions/checkout@v4
+        with:
+          repository: jxxghp/MoviePilot-Wiki
+          ref: main
+          path: .build/moviepilot-wiki
+          sparse-checkout: plugin.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Generate Plugin Market Default
+        id: plugin_market
+        run: |
+          python3 -m scripts.generate_plugin_market_default \
+            --wiki-file .build/moviepilot-wiki/plugin.md \
+            --config-file app/core/config.py
+          wiki_commit=$(git -C .build/moviepilot-wiki rev-parse HEAD)
+          echo "wiki_commit=$wiki_commit" >> "$GITHUB_OUTPUT"
+
       - name: Docker Meta
         id: meta
         uses: docker/metadata-action@v5
@@ -55,7 +74,9 @@ jobs:
             linux/arm64/v8
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.moviepilot.plugin-market-wiki-revision=${{ steps.plugin_market.outputs.wiki_commit }}
           # 让 worker 二进制下载地址自动指向当前仓库（fork 自给自足）
           # 上游主仓库跑此 workflow 时 ${{ github.repository }} = jxxghp/MoviePilot；
           # 任何 fork 跑时则指向 fork 自身。需配合 build-workers.yml 已发布对应 release。
