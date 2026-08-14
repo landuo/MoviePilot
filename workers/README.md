@@ -5,7 +5,7 @@
 ## 设计目标
 
 - **降低 NAS 资源占用**：把吃 CPU/内存/IO 的"肌肉活"剥离 Python 主进程
-- **零侵入**：Python 端通过 `WORKER_MODE` 配置切换，默认 `python` 模式与改造前完全一致
+- **默认启用**：Python 端通过 `WORKER_MODE` 配置切换，默认 `worker` 模式并启用全部 worker
 - **崩溃可降级**：worker 不可用时主进程自动 fallback 到 Python 实现
 
 ## 现有 worker
@@ -47,7 +47,7 @@ WORKER_MODE=hybrid
 WORKER_ENABLED=watcher
 ```
 
-默认 `WORKER_MODE=python`，老用户升级零感知。
+默认 `WORKER_MODE=worker`，启用全部 worker。
 
 ## 构建
 

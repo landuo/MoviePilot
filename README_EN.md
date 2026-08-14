@@ -37,7 +37,7 @@ To accelerate high-frequency tasks such as site searching, filesystem watching a
 
 **Container defaults (since v2)**:
 
-- `WORKER_MODE` defaults to `hybrid`
+- `WORKER_MODE` defaults to `worker`
 - `WORKER_ENABLED` defaults to `watcher,transfer,indexer`
 
 The container will start the matching Go processes automatically. If a binary is missing or a worker crashes, the Python side **transparently falls back** to its original implementation — existing users experience zero disruption when upgrading.

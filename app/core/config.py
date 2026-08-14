@@ -495,10 +495,10 @@ class ConfigModel(BaseModel):
     MEMORY_GC_INTERVAL: int = 30
 
     # ==================== Worker 子进程配置 ====================
-    # Worker 模式：python（默认，全 Python 实现，老用户零感知）
+    # Worker 模式：worker（默认，启用所有可用 worker）
+    #              python（显式禁用所有 worker）
     #              hybrid（按 WORKER_ENABLED 启用部分 worker）
-    #              worker（启用所有可用 worker）
-    WORKER_MODE: str = "python"
+    WORKER_MODE: str = "worker"
     # hybrid 模式下启用的 worker 名称列表
     # 支持三种环境变量写法（详见 _normalize_worker_enabled）：
     #   1. 单值：    WORKER_ENABLED=watcher
@@ -1027,7 +1027,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         判断指定名称的 worker 是否被启用
         :param worker_name: worker 名称（不含 mp- 前缀），如 "watcher"
         """
-        mode = (self.WORKER_MODE or "python").lower()
+        mode = (self.WORKER_MODE or "worker").lower()
         if mode == "python":
             return False
         if mode == "worker":

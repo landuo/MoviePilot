@@ -8,14 +8,19 @@ from app.core.config import settings
 
 class WorkerConfigDefaultsTest(TestCase):
     """
-    确认默认值与"老用户零感知"承诺一致：
-    - WORKER_MODE 默认 python
+    确认默认配置：
+    - WORKER_MODE 默认 worker
     - WORKER_ENABLED 默认空列表
-    - is_worker_enabled() 对任何 worker 都返回 False
+    - is_worker_enabled() 对任何 worker 都返回 True
     """
 
-    def test_default_mode_is_python(self):
-        self.assertEqual(settings.WORKER_MODE, "python")
+    def test_default_mode_is_worker(self):
+        self.assertEqual(settings.WORKER_MODE, "worker")
+
+    def test_default_mode_enables_all_workers(self):
+        self.assertTrue(settings.is_worker_enabled("watcher"))
+        self.assertTrue(settings.is_worker_enabled("transfer"))
+        self.assertTrue(settings.is_worker_enabled("indexer"))
 
     def test_default_enabled_is_empty(self):
         self.assertEqual(settings.WORKER_ENABLED, [])

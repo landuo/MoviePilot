@@ -37,7 +37,7 @@
 
 **容器默认行为（v2 起）**：
 
-- `WORKER_MODE` 默认值为 `hybrid`
+- `WORKER_MODE` 默认值为 `worker`
 - `WORKER_ENABLED` 默认启用 `watcher,transfer,indexer` 三个 Worker
 
 容器启动时会自动拉起对应的 Go 进程；若二进制不存在或运行异常，Python 端会自动 **fallback** 到原有路径，**对业务完全透明**，老用户升级零感知。

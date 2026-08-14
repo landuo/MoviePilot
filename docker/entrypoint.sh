@@ -129,11 +129,11 @@ function load_config_from_app_env() {
         ["NGINX_CLIENT_MAX_BODY_SIZE"]="50m"
 
         # workers
-        # 默认启用 hybrid 模式 + 全部 worker（watcher/transfer/indexer）
+        # 默认启用 worker 模式 + 全部 worker（watcher/transfer/indexer）
         # - 容器内已自带 Go 二进制，启用后可显著提升搜索/监控/转移性能
         # - 二进制不存在时（如自定义构建）start_workers 会跳过启动，Python 端自动 fallback
         # - 用户可通过 -e WORKER_MODE=python 显式关闭
-        ["WORKER_MODE"]="hybrid"
+        ["WORKER_MODE"]="worker"
         ["WORKER_ENABLED"]="watcher,transfer,indexer"
     )
 
