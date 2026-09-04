@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.core.config import settings
 from app.helper.directory import DirectoryHelper
 from app.helper.message import MessageHelper
+from app.helper.thread import ThreadHelper
 from app.log import logger
 from app.monitor.dispatcher import TransferDispatcher
 from app.monitor.poller import RemotePoller
@@ -238,8 +239,61 @@ class Monitor(ConfigReloadMixin, metaclass=SingletonClass):
         :param file_size: 文件大小
         :param event: worker 事件适配对象
         """
-        self.event_handler(event=event, text=text,
-                           event_path=src_path, file_size=file_size)
+        # worker 的回调超时只有 5 秒，识别与整理必须在确认接收后异步执行。
+        ThreadHelper().submit(
+            self._handle_worker_event,
+            text=text,
+            src_path=src_path,
+            file_size=file_size,
+            event=event,
+        )
+
+    def _handle_worker_event(self, text: str, src_path: str,
+                             file_size: int, event: Any) -> None:
+        """
+        在后台处理 worker 文件事件，并补扫整体进入监控范围的目录。
+
+        :param text: 事件描述
+        :param src_path: 发生变化的路径
+        :param file_size: 文件大小
+        :param event: worker 事件适配对象
+        """
+        if not event.is_directory:
+            self.event_handler(
+                event=event,
+                text=text,
+                event_path=src_path,
+                file_size=file_size,
+            )
+            return
+
+        if event.event_type != "created":
+            return
+
+        directory = Path(src_path)
+        try:
+            nested_paths = directory.rglob("*")
+            for nested_path in nested_paths:
+                if not nested_path.is_file():
+                    continue
+                try:
+                    nested_size = nested_path.stat().st_size
+                except OSError as err:
+                    logger.debug(f"读取新增目录文件失败: {nested_path} - {err}")
+                    continue
+                nested_event = monitor_worker.WorkerFileEvent(
+                    src_path=nested_path.as_posix(),
+                    is_directory=False,
+                    event_type="created",
+                )
+                self.event_handler(
+                    event=nested_event,
+                    text="创建",
+                    event_path=nested_path.as_posix(),
+                    file_size=nested_size,
+                )
+        except OSError as err:
+            logger.debug(f"扫描新增目录失败: {directory} - {err}")
 
     def __start_local_monitor(self, mon_path: Path, monitor_mode: str) -> bool:
         """

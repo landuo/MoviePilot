@@ -54,6 +54,8 @@ def _is_valid_local_monitor_dir(d) -> bool:
         return False
     if d.monitor_type != "monitor":
         return False
+    if getattr(d, "monitor_mode", "fast") == "compatibility":
+        return False
     if not d.library_path:
         return False
     # library 在 download 子目录会形成循环触发，过滤掉

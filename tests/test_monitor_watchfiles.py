@@ -5,6 +5,7 @@ from watchfiles import Change
 
 from app.monitor import DirectoryChangeEvent, LocalDirectoryWatcher, Monitor
 from app.monitor.dispatcher import TransferDispatcher
+from app.utils import monitor_worker
 
 
 class CallbackRecorder:
@@ -178,6 +179,90 @@ def test_event_handler_ignores_directory_events():
     )
 
     handle_file.assert_not_called()
+
+
+def test_worker_event_is_submitted_without_blocking_callback(monkeypatch):
+    """
+    worker 回调应只提交后台任务，避免同步整理阻塞后续文件事件。
+    """
+    monitor, _ = _build_monitor_with_dispatcher()
+    monitor._handle_worker_event = MagicMock()
+    thread_helper = MagicMock()
+    monkeypatch.setattr(
+        "app.monitor.monitor.ThreadHelper",
+        MagicMock(return_value=thread_helper),
+    )
+    event = monitor_worker.WorkerFileEvent(
+        src_path="/downloads/movie.mkv",
+        is_directory=False,
+        event_type="created",
+    )
+
+    monitor._on_worker_event(
+        text="创建",
+        src_path=event.src_path,
+        file_size=1024,
+        event=event,
+    )
+
+    thread_helper.submit.assert_called_once_with(
+        monitor._handle_worker_event,
+        text="创建",
+        src_path=event.src_path,
+        file_size=1024,
+        event=event,
+    )
+    monitor._handle_worker_event.assert_not_called()
+
+
+def test_worker_created_directory_expands_completed_media_files(tmp_path):
+    """
+    整体进入监控目录的下载任务应补扫其中已存在的媒体文件。
+    """
+    task_dir = tmp_path / "season"
+    task_dir.mkdir()
+    completed_file = task_dir / "episode.mkv"
+    downloading_file = task_dir / "pending.mkv.!qB"
+    ignored_file = task_dir / "metadata.nfo"
+    completed_file.write_bytes(b"completed")
+    downloading_file.write_bytes(b"pending")
+    ignored_file.write_bytes(b"ignored")
+
+    handle_file = MagicMock()
+    monitor, _ = _build_monitor_with_dispatcher(handle_file)
+    event = monitor_worker.WorkerFileEvent(
+        src_path=task_dir.as_posix(),
+        is_directory=True,
+        event_type="created",
+    )
+
+    monitor._handle_worker_event(
+        text="创建",
+        src_path=task_dir.as_posix(),
+        file_size=0,
+        event=event,
+    )
+
+    handle_file.assert_called_once_with(
+        storage="local",
+        event_path=completed_file,
+        file_size=9,
+    )
+
+
+def test_compatibility_monitor_is_not_claimed_by_worker():
+    """
+    兼容模式目录应保留给 Python 轮询监控处理。
+    """
+    monitor_dir = MagicMock(
+        storage="local",
+        monitor_type="monitor",
+        monitor_mode="compatibility",
+        download_path="/downloads",
+        library_path="/library",
+    )
+
+    assert not monitor_worker._is_valid_local_monitor_dir(monitor_dir)
 
 
 def test_event_handler_ignores_download_temp_files():
