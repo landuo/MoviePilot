@@ -61,6 +61,7 @@ _EXTENDED_MEDIA_ID_TAG_RE = re.compile(
     r'(?:bangumi(?:id)?|anilist(?:id)?)[=\-]\d+',
     re.IGNORECASE,
 )
+_UHD_BLURAY_RE = re.compile(r'UHD[\s._-]+Blu[\s._-]?ray', re.IGNORECASE)
 _RUST_PARSE_OPTIONS_CACHE_KEY = "_cache_key"
 
 
@@ -398,6 +399,9 @@ def _meta_from_rust(parsed: dict) -> Optional[MetaBase]:
     }
     for key, value in fields.items():
         setattr(meta, key, value)
+    source_text = meta.org_string or meta.title
+    if meta.resource_type == "UHD" and _UHD_BLURAY_RE.search(source_text):
+        meta.resource_type = "UHD BluRay"
     return meta
 
 

@@ -618,7 +618,7 @@ class MetaVideo(MetaBase):
             self._stop_name_flag = True
             if not self._source:
                 self._source = source_res.group(1)
-                self._last_token = self._source.upper()
+            self._last_token = source_res.group(1).upper()
             return
         effect_res = self._effect_pattern.search(token)
         if effect_res:
